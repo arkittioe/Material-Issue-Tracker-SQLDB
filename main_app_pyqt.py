@@ -258,25 +258,55 @@ class SpoolManagerDialog(QDialog):
 
 
 class SpoolSelectionDialog(QDialog):
-    def __init__(self, matching_items: list[SpoolItem], parent=None):
+    def __init__(self, matching_items: list[SpoolItem], remaining_mto_qty: float, parent=None):
         super().__init__(parent)
         self.setWindowTitle("انتخاب آیتم از انبار اسپول")
-        self.setMinimumSize(800, 400)
+        self.setMinimumSize(1200, 700)
 
         self.selected_data = []
         self.items = matching_items
+        self.remaining_mto_qty = remaining_mto_qty
 
         layout = QVBoxLayout(self)
 
-        info_label = QLabel("مقدار مورد نیاز از هر آیتم را در ستون 'مقدار مصرف' وارد کنید.")
-        layout.addWidget(info_label)
+        # ... (بخش فیلتر بدون تغییر باقی می‌ماند) ...
+        filter_group = QGroupBox("فیلتر")
+        filter_layout = QGridLayout(filter_group)
+        self.filters = {}
+        filter_definitions = {"Item Code": 2, "Comp. Type": 3, "Material": 7, "Bore1": 5}
+        col = 0
+        for label, col_idx in filter_definitions.items():
+            filter_label = QLabel(f"{label}:")
+            filter_input = QLineEdit()
+            filter_input.setPlaceholderText(f"جستجو بر اساس {label}...")
+            filter_input.textChanged.connect(self.filter_table)
+            filter_layout.addWidget(filter_label, 0, col)
+            filter_layout.addWidget(filter_input, 0, col + 1)
+            self.filters[col_idx] = filter_input
+            col += 2
+        layout.addWidget(filter_group)
 
+        # --- بخش اطلاعات با لیبل جدید ---
+        info_layout = QHBoxLayout()
+        info_label = QLabel(f"مقدار کل باقی‌مانده از MTO: {self.remaining_mto_qty}")
+        info_label.setStyleSheet("background-color: #f1fa8c; padding: 5px; border-radius: 3px;")
+
+        # <<< NEW: لیبل برای نمایش جمع کل انتخاب شده
+        self.total_selected_label = QLabel("جمع انتخاب شده: 0.0")
+        self.total_selected_label.setStyleSheet("font-weight: bold; padding: 5px; background-color: #d1e7dd;")
+
+        info_layout.addWidget(info_label, 1)
+        info_layout.addWidget(self.total_selected_label)
+        layout.addLayout(info_layout)
+
+        # ... (بخش جدول و دکمه‌ها بدون تغییر باقی می‌ماند) ...
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(14)
         self.table.setHorizontalHeaderLabels([
-            "ID", "Spool ID", "Component Type", "Bore", "Material", "موجودی", "مقدار مصرف"
+            "ID", "Spool ID", "Item Code", "Comp. Type", "Class/Angle", "Bore1", "Bore2",
+            "Material", "Schedule", "Thickness", "Length", "Qty Avail.", "موجودی", "مقدار مصرف"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
         self.populate_table()
@@ -287,34 +317,54 @@ class SpoolSelectionDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def populate_table(self):
+        # این لیست برای دسترسی آسان به اسپین‌باکس‌ها و موجودی اولیه‌شان است
+        self.spin_boxes_info = []
+
         self.table.setRowCount(len(self.items))
         for row, item in enumerate(self.items):
+            # ... (پر کردن ستون‌های ۰ تا ۱۱ بدون تغییر باقی می‌ماند) ...
             self.table.setItem(row, 0, QTableWidgetItem(str(item.id)))
             self.table.setItem(row, 1, QTableWidgetItem(str(item.spool.spool_id)))
-            self.table.setItem(row, 2, QTableWidgetItem(item.component_type))
-            self.table.setItem(row, 3, QTableWidgetItem(str(item.p1_bore)))
-            self.table.setItem(row, 4, QTableWidgetItem(item.material))
+            self.table.setItem(row, 2, QTableWidgetItem(item.item_code or ""))
+            self.table.setItem(row, 3, QTableWidgetItem(item.component_type or ""))
+            self.table.setItem(row, 4, QTableWidgetItem(item.class_angle or ""))
+            self.table.setItem(row, 5, QTableWidgetItem(str(item.p1_bore or "")))
+            self.table.setItem(row, 6, QTableWidgetItem(str(item.p2_bore or "")))
+            self.table.setItem(row, 7, QTableWidgetItem(item.material or ""))
+            self.table.setItem(row, 8, QTableWidgetItem(item.schedule or ""))
+            self.table.setItem(row, 9, QTableWidgetItem(str(item.thickness or "")))
+            self.table.setItem(row, 10, QTableWidgetItem(str(item.length or "")))
+            self.table.setItem(row, 11, QTableWidgetItem(str(item.qty_available or "")))
 
-            # --- منطق جدید برای نمایش موجودی ---
             if "PIPE" in (item.component_type or "").upper():
-                available_qty = item.length or 0
+                available_qty_in_spool = item.length or 0
             else:
-                available_qty = item.qty_available or 0
-
-            self.table.setItem(row, 5, QTableWidgetItem(str(available_qty)))
+                available_qty_in_spool = item.qty_available or 0
+            self.table.setItem(row, 12, QTableWidgetItem(str(available_qty_in_spool)))
 
             spin_box = QDoubleSpinBox()
-            spin_box.setRange(0, available_qty)
+            # <<< CHANGE: رنج اولیه فقط بر اساس موجودی خود آیتم است
+            spin_box.setRange(0, available_qty_in_spool)
             spin_box.setDecimals(3)
-            self.table.setCellWidget(row, 6, spin_box)
+            # <<< CHANGE: اتصال سیگنال به تابع جدید
+            spin_box.valueChanged.connect(self.update_totals)
+            self.table.setCellWidget(row, 13, spin_box)
 
-            for col in range(6):
-                self.table.item(row, col).setFlags(self.table.item(row, col).flags() & ~Qt.ItemFlag.ItemIsEditable)
+            # ذخیره اسپین‌باکس و حداکثر موجودی اولیه‌اش
+            self.spin_boxes_info.append({'widget': spin_box, 'max_avail': available_qty_in_spool})
+
+            for col in range(13):
+                cell_item = self.table.item(row, col)
+                if cell_item:
+                    cell_item.setFlags(cell_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+        # یک بار در ابتدا برای تنظیم اولیه فراخوانی می‌شود
+        self.update_totals()
 
     def accept_data(self):
         self.selected_data = []
         for row in range(self.table.rowCount()):
-            spin_box = self.table.cellWidget(row, 6)
+            spin_box = self.table.cellWidget(row, 13) # Read from the correct column
             used_qty = spin_box.value()
 
             if used_qty > 0:
@@ -322,12 +372,55 @@ class SpoolSelectionDialog(QDialog):
                 self.selected_data.append({
                     "spool_item_id": spool_item_id,
                     "used_qty": used_qty
-                })#
+                })
         self.accept()
 
     def get_selected_data(self):
         return self.selected_data
 
+    def filter_table(self):
+        """Hides rows that do not match the filter criteria."""
+        filter_texts = {col: f.text().lower() for col, f in self.filters.items()}
+
+        for row in range(self.table.rowCount()):
+            is_visible = True
+            for col, filter_text in filter_texts.items():
+                if not filter_text:
+                    continue
+                item = self.table.item(row, col)
+                if not item or filter_text not in item.text().lower():
+                    is_visible = False
+                    break
+            self.table.setRowHidden(row, not is_visible)
+
+    def update_totals(self):
+        """Calculates the total selected quantity and dynamically updates the limits of all spin boxes."""
+
+        current_total = sum(info['widget'].value() for info in self.spin_boxes_info)
+
+        # آپدیت لیبل جمع کل
+        self.total_selected_label.setText(f"جمع انتخاب شده: {current_total:.3f}")
+        if current_total > self.remaining_mto_qty:
+            self.total_selected_label.setStyleSheet(
+                "font-weight: bold; padding: 5px; background-color: #f8d7da;")  # Red
+        else:
+            self.total_selected_label.setStyleSheet(
+                "font-weight: bold; padding: 5px; background-color: #d1e7dd;")  # Green
+
+        # محاسبه مقداری که هنوز می‌توان انتخاب کرد
+        remaining_headroom = self.remaining_mto_qty - current_total
+
+        # آپدیت سقف مجاز برای تمام اسپین‌باکس‌ها
+        for info in self.spin_boxes_info:
+            spin_box = info['widget']
+
+            # حداکثر مقدار جدید = مقدار فعلی خودش + مقداری که هنوز جا دارد
+            # این مقدار نباید از موجودی فیزیکی خود آیتم بیشتر شود
+            new_max = min(info['max_avail'], spin_box.value() + remaining_headroom)
+
+            spin_box.blockSignals(True)
+            spin_box.setMaximum(max(0, new_max))
+            spin_box.blockSignals(False)
 
 class MTOConsumptionDialog(QDialog):
     def __init__(self, dm: DataManager, project_id: int, line_no: str, miv_record_id: int = None, parent=None):
@@ -435,23 +528,25 @@ class MTOConsumptionDialog(QDialog):
 
     def handle_spool_selection(self, row_idx):
         item_data = self.progress_data[row_idx]
-        # دوباره اطلاعات تایپ و سایز را از ردیف MTO می‌خوانیم
         item_type = item_data.get("Type")
         p1_bore = item_data.get("Bore")
 
+        # --- NEW: Get the remaining quantity for the MTO item ---
+        remaining_qty = item_data.get("Remaining Qty", 0)
+
         if not item_type:
             self.parent().show_message("هشدار", "نوع آیتم (Type) برای این ردیف MTO مشخص نشده است.", "warning")
-            # اگر تایپ مشخص نباشد، برای جلوگیری از خطا، تابع را متوقف می‌کنیم
             return
 
-        # فراخوانی تابع جدید که از دیکشنری نگاشت استفاده می‌کند
         matching_items = self.dm.get_mapped_spool_items(item_type, p1_bore)
 
         if not matching_items:
-            self.parent().show_message("اطلاعات", f"هیچ اسپول سازگار برای نوع '{item_type}' و سایز '{p1_bore}' یافت نشد.", "info")
+            self.parent().show_message("اطلاعات",
+                                       f"هیچ اسپول سازگار برای نوع '{item_type}' و سایز '{p1_bore}' یافت نشد.", "info")
             return
 
-        dialog = SpoolSelectionDialog(matching_items, self)
+        # --- CHANGE: Pass the remaining_qty to the dialog ---
+        dialog = SpoolSelectionDialog(matching_items, remaining_qty, self)
         if dialog.exec():
             selected_spools = dialog.get_selected_data()
             self.spool_selections[row_idx] = selected_spools
@@ -492,32 +587,24 @@ class MTOConsumptionDialog(QDialog):
             spin_box.setValue(max(0, new_max))
 
     def accept_data(self):
-        self.consumed_data = []
-        self.spool_consumption_data = []
+        total_selected = sum(info['widget'].value() for info in self.spin_boxes_info)
 
-        for row_idx, item in enumerate(self.progress_data):
-            total_consumed_for_item = 0
+        if total_selected > self.remaining_mto_qty:
+            QMessageBox.warning(self, "خطا", f"مجموع مقادیر انتخاب شده ({total_selected}) از مقدار باقی‌مانده ({self.remaining_mto_qty}) بیشتر است.")
+            return
 
-            spin_box = self.table.cellWidget(row_idx, 8)
-            direct_qty = spin_box.value()
-            total_consumed_for_item += direct_qty
+        self.selected_data = []
+        for row in range(self.table.rowCount()):
+            spin_box = self.table.cellWidget(row, 13)
+            used_qty = spin_box.value()
 
-            spool_selections = self.spool_selections.get(row_idx, [])
-            if spool_selections:
-                qty_from_spools = sum(s['used_qty'] for s in spool_selections)
-                total_consumed_for_item += qty_from_spools
-                self.spool_consumption_data.extend(spool_selections)
-
-            if total_consumed_for_item > 0:
-                self.consumed_data.append({
-                    "mto_item_id": item["mto_item_id"],
-                    "used_qty": total_consumed_for_item,
-                    "item_code": item["Item Code"],
-                    "description": item["Description"],
-                    "unit": item["Unit"]
+            if used_qty > 0:
+                spool_item_id = int(self.table.item(row, 0).text())
+                self.selected_data.append({
+                    "spool_item_id": spool_item_id,
+                    "used_qty": used_qty
                 })
-
-        super().accept()
+        self.accept()
 
     def get_data(self):
         return self.consumed_data, self.spool_consumption_data
