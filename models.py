@@ -120,6 +120,71 @@ class MigratedFile(Base):
     migrated_at = Column(DateTime, default=datetime.utcnow)
 
 
+
+# -------------------------
+# جدول Spools
+# -------------------------
+class Spool(Base):
+    __tablename__ = 'spools'
+    id = Column(Integer, primary_key=True)
+    spool_id = Column(String, unique=True, nullable=False)  # این همان SPOOL_ID در فایل CSV است
+    row_no = Column(Integer)
+    line_no = Column(String)
+    sheet_no = Column(Integer)
+    location = Column(String)
+    command = Column(String)
+
+    # تعریف رابطه: هر اسپول می‌تواند چندین آیتم داشته باشد
+    items = relationship("SpoolItem", back_populates="spool", cascade="all, delete-orphan")
+    # تعریف رابطه: هر اسپول می‌تواند در چندین رکورد مصرف ثبت شود
+    consumptions = relationship("SpoolConsumption", back_populates="spool", cascade="all, delete-orphan")
+
+
+# -------------------------
+# جدول SpoolItems
+# -------------------------
+class SpoolItem(Base):
+    __tablename__ = 'spool_items'
+    id = Column(Integer, primary_key=True)
+    # کلید خارجی برای اتصال به جدول Spool
+    spool_id_fk = Column(Integer, ForeignKey('spools.id'), nullable=False)
+
+    component_type = Column(String)
+    class_angle = Column(String)
+    p1_bore = Column(Float)
+    p2_bore = Column(Float)
+    material = Column(String)
+    schedule = Column(String)
+    thickness = Column(Float)
+    length = Column(Float)
+    qty_available = Column(Float)
+    item_code = Column(String)
+
+    # تعریف رابطه: هر آیتم متعلق به یک اسپول است
+    spool = relationship("Spool", back_populates="items")
+    # تعریف رابطه: هر آیتم اسپول می‌تواند در چندین رکورد مصرف ثبت شود
+    consumptions = relationship("SpoolConsumption", back_populates="spool_item", cascade="all, delete-orphan")
+
+
+# -------------------------
+# جدول SpoolConsumption (این جدول از روی فایل ساخته نمی‌شود ولی ساختار آن لازم است)
+# -------------------------
+class SpoolConsumption(Base):
+    __tablename__ = 'spool_consumption'
+    id = Column(Integer, primary_key=True)
+
+    # کلیدهای خارجی برای اتصال به جداول دیگر
+    spool_item_id = Column(Integer, ForeignKey('spool_items.id'), nullable=False)
+    spool_id = Column(Integer, ForeignKey('spools.id'), nullable=False)
+    miv_record_id = Column(Integer, ForeignKey('miv_records.id'), nullable=False)
+
+    used_qty = Column(Float, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+    # تعریف روابط
+    spool_item = relationship("SpoolItem", back_populates="consumptions")
+    spool = relationship("Spool", back_populates="consumptions")
+
 # -------------------------
 # تابع ایجاد دیتابیس و جداول
 # -------------------------
