@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker, joinedload
 from functools import lru_cache
 from datetime import datetime
 from models import Base, Project, MIVRecord, MTOItem, MTOConsumption, ActivityLog, MTOProgress, Spool, SpoolItem, \
-    SpoolConsumption
+    SpoolConsumption, SpoolProgress
 import numpy as np
 import pandas as pd
 import difflib
@@ -28,9 +28,6 @@ SPOOL_TYPE_MAPPING = {
     # ... شما می‌توانید آیتم‌های بیشتری به اینجا اضافه کنید
 }
 
-# به جای print(f"⚠️ خطا...")
-# logging.error(f"خطا در ثبت رکورد: {e}")
-
 class DataManager:
     def __init__(self, db_path="miv_registry.db"):
         """
@@ -46,9 +43,13 @@ class DataManager:
         """یک سشن جدید برای ارتباط با دیتابیس ایجاد می‌کند."""
         return self.Session()
 
-    def log_activity(self, user, action, details=""):
-        """رویدادها و تغییرات مهم را در جدول ActivityLog ثبت می‌کند."""
-        session = self.get_session()
+    def log_activity(self, user, action, details="", session=None):
+        """ثبت لاگ در جدول ActivityLog"""
+        own_session = False
+        if session is None:
+            session = self.get_session()
+            own_session = True
+
         try:
             log = ActivityLog(
                 user=user,
@@ -57,12 +58,15 @@ class DataManager:
                 timestamp=datetime.now()
             )
             session.add(log)
-            session.commit()
+            if own_session:
+                session.commit()
         except Exception as e:
-            session.rollback()
+            if own_session:
+                session.rollback()
             print(f"⚠️ خطا در ثبت لاگ: {e}")
         finally:
-            session.close()
+            if own_session:
+                session.close()
 
     # --------------------------------------------------------------------
     # متدهای اصلی برای مدیریت رکوردها (CRUD Operations)
@@ -71,152 +75,182 @@ class DataManager:
     def register_miv_record(self, project_id, form_data, consumption_items, spool_consumption_items=None):
         session = self.get_session()
         try:
-            # ۱. ثبت رکورد اصلی MIV
+            # ... (بخش ساخت MIVRecord) ...
             new_record = MIVRecord(
                 project_id=project_id,
                 line_no=form_data['Line No'],
                 miv_tag=form_data['MIV Tag'],
                 location=form_data['Location'],
                 status=form_data['Status'],
-                comment=form_data['Comment'],
+                comment=form_data.get('Comment', ''),
                 registered_for=form_data['Registered For'],
                 registered_by=form_data['Registered By'],
                 last_updated=datetime.now(),
                 is_complete=form_data.get('Complete', False)
             )
             session.add(new_record)
-            session.flush()  # ID برای new_record ساخته می‌شود
+            session.flush()
 
-            # ۲. ثبت مصرف‌های MTO
             for item in consumption_items:
-                consumption = MTOConsumption(
+                session.add(MTOConsumption(
                     mto_item_id=item['mto_item_id'],
                     miv_record_id=new_record.id,
-                    used_qty=item['used_qty']
-                )
-                session.add(consumption)
+                    used_qty=item['used_qty'],  # از UI گرد شده می‌آید
+                    timestamp=datetime.now()
+                ))
 
-            # ۳. منطق ثبت مصرف اسپول به اینجا منتقل شد تا در یک تراکنش واحد باشد
             if spool_consumption_items:
-                user = form_data.get('Registered By', 'system')
-                spool_ids_used = set()
-
+                spool_notes = []
                 for consumption in spool_consumption_items:
-                    spool_item_id = consumption['spool_item_id']
+                    # ... (بخش کم کردن از موجودی اسپول بدون تغییر) ...
+                    spool_item = session.get(SpoolItem, consumption['spool_item_id'])
                     used_qty = consumption['used_qty']
-
-                    # رفع هشدار: استفاده از session.get به جای query(...).get()
-                    spool_item = session.get(SpoolItem, spool_item_id)
-                    if not spool_item:
-                        raise Exception(f"آیتم اسپول با شناسه {spool_item_id} یافت نشد.")
-
-                    # منطق جدید برای محاسبه موجودی
-                    if "PIPE" in (spool_item.component_type or "").upper():
-                        if (spool_item.length or 0) < used_qty:
-                            raise Exception(f"طول موجود پایپ در اسپول {spool_item.id} کافی نیست.")
+                    if not spool_item: raise ValueError(f"Spool item ID {consumption['spool_item_id']} not found.")
+                    is_pipe = "PIPE" in (spool_item.component_type or "").upper()
+                    if is_pipe:
+                        if (spool_item.length or 0) < used_qty: raise ValueError(
+                            f"Insufficient length for pipe in spool {spool_item.spool.spool_id}.")
                         spool_item.length -= used_qty
                     else:
-                        if (spool_item.qty_available or 0) < used_qty:
-                            raise Exception(f"موجودی آیتم {spool_item.id} کافی نیست.")
+                        if (spool_item.qty_available or 0) < used_qty: raise ValueError(
+                            f"Insufficient qty for {spool_item.component_type} in spool {spool_item.spool.spool_id}.")
                         spool_item.qty_available -= used_qty
 
-                    new_consumption = SpoolConsumption(
+                    session.add(SpoolConsumption(
                         spool_item_id=spool_item.id,
                         spool_id=spool_item.spool.id,
                         miv_record_id=new_record.id,
-                        used_qty=used_qty,
+                        used_qty=used_qty,  # از UI گرد شده می‌آید
                         timestamp=datetime.now()
-                    )
-                    session.add(new_consumption)
-                    spool_ids_used.add(str(spool_item.spool.id))
+                    ))
 
-                self.log_activity(
-                    user=user,
-                    action="REGISTER_SPOOL_CONSUMPTION",
-                    details=f"Spool items consumed for MIV ID {new_record.id} from Spools: {', '.join(spool_ids_used)}"
-                )
+                    # --- CHANGE: اصلاح واحد در Note ---
+                    unit = "m" if is_pipe else "عدد"
+                    spool_notes.append(
+                        f"{used_qty:.2f} {unit} از {spool_item.component_type} (اسپول: {spool_item.spool.spool_id})")
 
-            # ۴. ثبت نهایی تمام تغییرات در دیتابیس
+                if spool_notes:
+                    final_comment = (new_record.comment or "") + " | مصرف اسپول: " + ", ".join(spool_notes)
+                    new_record.comment = final_comment
+
             session.commit()
-
-            # ۵. بازسازی جدول پیشرفت پس از ثبت موفق
             self.rebuild_mto_progress_for_line(project_id, form_data['Line No'])
 
             self.log_activity(
-                user=form_data['Registered By'],
-                action="REGISTER_MIV",
-                details=f"MIV Tag '{form_data['MIV Tag']}' for Line '{form_data['Line No']}' in project ID {project_id}"
+                user=form_data['Registered By'], action="REGISTER_MIV",
+                details=f"MIV Tag '{form_data['MIV Tag']}' for Line '{form_data['Line No']}'",
             )
             return True, "رکورد با موفقیت ثبت شد."
 
         except Exception as e:
             session.rollback()
-            logging.error(f"خطا در ثبت رکورد: {e}")
-            return False, f"خطا در ثبت رکord: {e}"
+            import traceback
+            logging.error(f"خطا در ثبت رکورد: {e}\n{traceback.format_exc()}")
+            return False, f"خطا در ثبت رکورد: {e}"
         finally:
             session.close()
 
-    def update_miv_record(self, record_id, updated_data, new_consumption_items=None, user="system"):
-        """
-        یک رکورد MIV را آپدیت می‌کند (هم داده‌های اصلی و هم مصرف‌ها).
-        پس از هر آپدیت، جدول MTOProgress را برای خط مربوطه بازسازی می‌کند.
-        """
+    def update_miv_items(self, miv_record_id, updated_items, updated_spool_items, user="system"):
         session = self.get_session()
         try:
-            record = session.query(MIVRecord).filter(MIVRecord.id == record_id).first()
+            record = session.get(MIVRecord, miv_record_id)
             if not record:
-                return False, f"رکورد با شناسه {record_id} یافت نشد."
+                return False, f"MIV با شناسه {miv_record_id} یافت نشد."
 
-            # ۱. آپدیت فیلدهای اصلی رکورد (مانند location, status, comment)
-            for key, value in updated_data.items():
-                if hasattr(record, key):
-                    setattr(record, key, value)
-            record.last_updated = datetime.now()
+            project_id = record.project_id
+            line_no = record.line_no
 
-            # ۲. اگر لیست مصرف جدیدی ارائه شده باشد، جایگزین قبلی‌ها کن
-            if new_consumption_items is not None:
-                # پاک کردن تمام مصرف‌های قبلی این MIV
-                session.query(MTOConsumption).filter(MTOConsumption.miv_record_id == record_id).delete()
+            # --- مدیریت مصرف اسپول ---
+            # 1. بازگرداندن موجودی‌های قدیمی اسپول به انبار
+            old_spool_consumptions = session.query(SpoolConsumption).filter(
+                SpoolConsumption.miv_record_id == miv_record_id).all()
+            for old_c in old_spool_consumptions:
+                spool_item = session.get(SpoolItem, old_c.spool_item_id)
+                if spool_item:
+                    is_pipe = "PIPE" in (spool_item.component_type or "").upper()
+                    if is_pipe:
+                        spool_item.length = (spool_item.length or 0) + old_c.used_qty
+                    else:
+                        spool_item.qty_available = (spool_item.qty_available or 0) + old_c.used_qty
 
-                # اضافه کردن مصرف‌های جدید
-                for item in new_consumption_items:
-                    consumption = MTOConsumption(
-                        mto_item_id=item['mto_item_id'],
-                        miv_record_id=record.id,
-                        used_qty=item['used_qty']
-                    )
-                    session.add(consumption)
+            # 2. حذف رکوردهای مصرف قدیمی (هم MTO و هم Spool)
+            session.query(MTOConsumption).filter(MTOConsumption.miv_record_id == miv_record_id).delete()
+            session.query(SpoolConsumption).filter(SpoolConsumption.miv_record_id == miv_record_id).delete()
+            session.flush()
 
+            # --- ثبت مصرف‌های جدید ---
+            # 3. ثبت مصرف مستقیم MTO
+            for item in updated_items:
+                session.add(MTOConsumption(
+                    mto_item_id=item["mto_item_id"],
+                    miv_record_id=miv_record_id,
+                    used_qty=item["used_qty"],
+                    timestamp=datetime.now()
+                ))
+
+            # 4. ثبت مصرف جدید اسپول
+            spool_notes = []
+            if updated_spool_items:
+                for s_item in updated_spool_items:
+                    spool_item = session.get(SpoolItem, s_item['spool_item_id'])
+                    used_qty = s_item['used_qty']
+
+                    if not spool_item:
+                        raise ValueError(f"آیتم اسپول با شناسه {s_item['spool_item_id']} یافت نشد.")
+
+                    is_pipe = "PIPE" in (spool_item.component_type or "").upper()
+
+                    if is_pipe:
+                        if (spool_item.length or 0) < used_qty:
+                            raise ValueError(f"طول موجود پایپ در اسپول {spool_item.spool.spool_id} کافی نیست.")
+                        spool_item.length -= used_qty
+                    else:
+                        if (spool_item.qty_available or 0) < used_qty:
+                            raise ValueError(
+                                f"موجودی آیتم {spool_item.component_type} در اسپول {spool_item.spool.spool_id} کافی نیست.")
+                        spool_item.qty_available -= used_qty
+
+                    session.add(SpoolConsumption(
+                        spool_item_id=spool_item.id,
+                        spool_id=spool_item.spool.id,
+                        miv_record_id=miv_record_id,
+                        used_qty=used_qty,
+                        timestamp=datetime.now()
+                    ))
+                    # ساخت Note
+                    unit = "mm" if is_pipe else "عدد"
+                    spool_notes.append(
+                        f"{used_qty:.1f} {unit} از {spool_item.component_type} (اسپول: {spool_item.spool.spool_id})")
+
+            # 5. (مهم) بازسازی کامل آمار خط بعد از تمام تغییرات
             session.commit()
+            self.rebuild_mto_progress_for_line(project_id, line_no)
 
-            # ۳. (مهم) بروزرسانی جدول MTOProgress برای خط مربوطه با بازسازی کامل
-            self.rebuild_mto_progress_for_line(record.project_id, record.line_no)
-
-            # ثبت لاگ
             self.log_activity(
                 user=user,
-                action="UPDATE_MIV",
-                details=f"Record ID {record_id} updated in project {record.project_id}, line {record.line_no}"
+                action="UPDATE_MIV_ITEMS",
+                details=f"Consumption items updated for MIV {miv_record_id}",
             )
-
-            return True, "رکورد با موفقیت ویرایش شد."
+            return True, "آیتم‌های مصرفی با موفقیت بروزرسانی شدند."
 
         except Exception as e:
             session.rollback()
-            logging.error(f"خطا در به‌روزرسانی رکورد {record_id}: {e}")
-            return False, f"خطا در به‌روزرسانی رکورد: {e}"
+            import traceback
+            logging.error(f"خطا در بروزرسانی آیتم‌های MIV {miv_record_id}: {e}\n{traceback.format_exc()}")
+            return False, f"خطا در بروزرسانی آیتم‌های MIV: {e}"
         finally:
             session.close()
 
-    def delete_miv_record(self, record_id):
+    def delete_miv_record(self, record_id, user="system"):
         """
-        یک رکورد MIV و تمام مصرف‌های مرتبط با آن را حذف می‌کند.
-        سپس جدول MTOProgress را برای آن خط به‌طور کامل بازسازی می‌کند تا آمار دقیق شود.
+        یک رکورد MIV و تمام مصرف‌های مرتبط با آن (MTO و Spool) را حذف می‌کند.
+        موجودی مصرف شده از اسپول‌ها را به انبار برمی‌گرداند.
+        سپس جدول MTOProgress را برای آن خط به‌طور کامل بازسازی می‌کند.
         """
         session = self.get_session()
         try:
-            # ۱. رکورد اصلی را پیدا کن تا به اطلاعات پروژه و خط دسترسی داشته باشی
-            record = session.query(MIVRecord).filter(MIVRecord.id == record_id).first()
+            # ۱. رکورد اصلی را پیدا کن
+            record = session.get(MIVRecord, record_id)
             if not record:
                 return False, "رکورد یافت نشد."
 
@@ -224,21 +258,33 @@ class DataManager:
             line_no = record.line_no
             miv_tag = record.miv_tag
 
-            # ۲. تمام رکوردهای مصرفی مرتبط با این MIV را حذف کن
-            session.query(MTOConsumption).filter(MTOConsumption.miv_record_id == record_id).delete()
+            # ۲. (مهم) موجودی‌های مصرفی اسپول را به انبار برگردان
+            spool_consumptions = session.query(SpoolConsumption).filter(SpoolConsumption.miv_record_id == record_id).all()
+            for consumption in spool_consumptions:
+                spool_item = session.get(SpoolItem, consumption.spool_item_id)
+                if spool_item:
+                    is_pipe = "PIPE" in (spool_item.component_type or "").upper()
+                    if is_pipe:
+                        spool_item.length = (spool_item.length or 0) + consumption.used_qty
+                    else:
+                        spool_item.qty_available = (spool_item.qty_available or 0) + consumption.used_qty
 
-            # ۳. خود رکورد MIV را حذف کن
+            # ۳. تمام رکوردهای مصرفی مرتبط (MTO و Spool) را حذف کن
+            session.query(MTOConsumption).filter(MTOConsumption.miv_record_id == record_id).delete()
+            session.query(SpoolConsumption).filter(SpoolConsumption.miv_record_id == record_id).delete()
+
+            # ۴. خود رکورد MIV را حذف کن
             session.delete(record)
             session.commit()
 
-            # ۴. (مهم) آمار پیشرفت را برای این خط از نو بساز
+            # ۵. (مهم) آمار پیشرفت را برای این خط از نو بساز
             self.rebuild_mto_progress_for_line(project_id, line_no)
 
-            # ۵. ثبت لاگ
+            # ۶. ثبت لاگ
             self.log_activity(
-                user="system",  # در عمل نام کاربر لاگین شده قرار می‌گیرد
+                user=user,
                 action="DELETE_MIV",
-                details=f"Deleted MIV Record ID {record_id} (Tag: {miv_tag}) from project {project_id}, line {line_no}"
+                details=f"Deleted MIV Record ID {record_id} (Tag: {miv_tag}) for line {line_no}"
             )
 
             return True, "رکورد و مصرف‌های مرتبط با موفقیت حذف شدند."
@@ -251,105 +297,71 @@ class DataManager:
             session.close()
 
     def rebuild_mto_progress_for_line(self, project_id, line_no):
-        """
-        جدول MTOProgress برای یک خط را از صفر بازسازی می‌کند.
-        """
         session = self.get_session()
         try:
-            # همه رکوردهای قدیمی progress برای این خط رو حذف کن
-            session.query(MTOProgress).filter(
-                MTOProgress.project_id == project_id,
-                MTOProgress.line_no == line_no
-            ).delete()
-
-            # دوباره از روی MTOItem + MTOConsumption بساز
-            mto_items = session.query(MTOItem).filter(
+            mto_items_in_line = session.query(MTOItem).filter(
                 MTOItem.project_id == project_id,
                 MTOItem.line_no == line_no
             ).all()
 
-            for item in mto_items:
-                if item.item_type and "pipe" in (item.item_type or "").lower():
-                    total_required = item.length_m or 0
-                else:
-                    total_required = item.quantity or 0
+            for mto_item in mto_items_in_line:
+                # --- CHANGE: حذف تبدیل واحد ---
+                is_pipe = mto_item.item_type and 'pipe' in mto_item.item_type.lower()
+                total_required = mto_item.length_m or 0 if is_pipe else mto_item.quantity or 0
 
-                total_used = session.query(func.coalesce(func.sum(MTOConsumption.used_qty), 0.0)) \
-                    .filter(MTOConsumption.mto_item_id == item.id).scalar()
+                direct_used = session.query(func.coalesce(func.sum(MTOConsumption.used_qty), 0.0)).filter(
+                    MTOConsumption.mto_item_id == mto_item.id
+                ).scalar()
 
-                new_progress = MTOProgress(
-                    project_id=project_id,
-                    line_no=line_no,
-                    mto_item_id=item.id,
-                    item_code=item.item_code,
-                    description=item.description,
-                    unit=item.unit,
-                    total_qty=total_required,
-                    used_qty=total_used or 0,
-                    remaining_qty=max(0, (total_required or 0) - (total_used or 0)),
-                    last_updated=datetime.now()
+                # ... (منطق پیدا کردن spool_equivalents بدون تغییر) ...
+                mto_type_upper = str(mto_item.item_type).upper().strip()
+                spool_equivalents = [mto_type_upper]
+                for key, aliases in SPOOL_TYPE_MAPPING.items():
+                    if mto_type_upper == key or mto_type_upper in aliases:
+                        spool_equivalents.extend([key] + list(aliases));
+                        break
+                spool_equivalents = list(set(spool_equivalents))
+
+                spool_used_query = session.query(func.coalesce(func.sum(SpoolConsumption.used_qty), 0.0)).join(
+                    MIVRecord, SpoolConsumption.miv_record_id == MIVRecord.id
+                ).join(
+                    SpoolItem, SpoolConsumption.spool_item_id == SpoolItem.id
+                ).filter(
+                    MIVRecord.line_no == line_no,
+                    MIVRecord.project_id == project_id,
+                    func.upper(SpoolItem.component_type).in_(spool_equivalents),
                 )
-                session.add(new_progress)
+                if mto_item.p1_bore_in is not None:
+                    spool_used_query = spool_used_query.filter(SpoolItem.p1_bore == mto_item.p1_bore_in)
+
+                spool_used = spool_used_query.scalar()
+
+                total_used = (direct_used or 0) + (spool_used or 0)
+                remaining = max(0, total_required - total_used)
+
+                progress = session.query(MTOProgress).filter(
+                    MTOProgress.mto_item_id == mto_item.id
+                ).first()
+
+                if not progress:
+                    progress = MTOProgress(
+                        mto_item_id=mto_item.id, project_id=project_id, line_no=line_no,
+                        item_code=mto_item.item_code, description=mto_item.description,
+                        unit=mto_item.unit
+                    )
+                    session.add(progress)
+
+                # --- CHANGE: گرد کردن مقادیر قبل از ذخیره ---
+                progress.total_qty = round(total_required, 2)
+                progress.used_qty = round(total_used, 2)
+                progress.remaining_qty = round(remaining, 2)
+                progress.last_updated = datetime.now()
 
             session.commit()
         except Exception as e:
             session.rollback()
-            print(f"⚠️ خطا در بازسازی MTOProgress: {e}")
-        finally:
-            session.close()
-
-    def update_miv_items(self, miv_record_id, updated_items, updated_spool_items, user="system"):
-        session = self.get_session()
-        try:
-            record = session.get(MIVRecord, miv_record_id)
-            if not record:
-                return False, f"MIV با شناسه {miv_record_id} یافت نشد."
-
-            session.query(MTOConsumption).filter(MTOConsumption.miv_record_id == miv_record_id).delete()
-            for item in updated_items:
-                session.add(MTOConsumption(mto_item_id=item["mto_item_id"], miv_record_id=miv_record_id,
-                                           used_qty=item["used_qty"]))
-
-            old_spool_consumptions = session.query(SpoolConsumption).filter(
-                SpoolConsumption.miv_record_id == miv_record_id).all()
-            for old_c in old_spool_consumptions:
-                spool_item = session.get(SpoolItem, old_c.spool_item_id)
-                if spool_item:
-                    if "PIPE" in (spool_item.component_type or "").upper():
-                        spool_item.length = (spool_item.length or 0) + old_c.used_qty
-                    else:
-                        spool_item.qty_available = (spool_item.qty_available or 0) + old_c.used_qty
-
-            session.query(SpoolConsumption).filter(SpoolConsumption.miv_record_id == miv_record_id).delete()
-            session.flush()
-
-            if updated_spool_items:
-                for s_item in updated_spool_items:
-                    spool_item = session.get(SpoolItem, s_item['spool_item_id'])
-                    if not spool_item: raise Exception(f"آیتم اسپول با شناسه {s_item['spool_item_id']} یافت نشد.")
-
-                    used_qty = s_item['used_qty']
-                    if "PIPE" in (spool_item.component_type or "").upper():
-                        if (spool_item.length or 0) < used_qty: raise Exception(
-                            f"طول موجود پایپ در اسپول {spool_item.id} کافی نیست.")
-                        spool_item.length -= used_qty
-                    else:
-                        if (spool_item.qty_available or 0) < used_qty: raise Exception(
-                            f"موجودی آیتم {spool_item.id} کافی نیست.")
-                        spool_item.qty_available -= used_qty
-
-                    session.add(SpoolConsumption(spool_item_id=spool_item.id, spool_id=spool_item.spool.id,
-                                                 miv_record_id=miv_record_id, used_qty=used_qty))
-
-            session.commit()
-            self.rebuild_mto_progress_for_line(record.project_id, record.line_no)
-            self.log_activity(user=user, action="UPDATE_MIV_ITEMS",
-                              details=f"Consumption items (MTO & Spool) updated for MIV {miv_record_id}")
-            return True, "آیتم‌های مصرفی با موفقیت بروزرسانی شدند."
-        except Exception as e:
-            session.rollback()
-            logging.error(f"خطا در بروزرسانی آیتم‌های MIV {miv_record_id}: {e}")
-            return False, f"خطا در بروزرسانی آیتم‌های MIV: {e}"
+            import traceback
+            logging.error(f"خطا در rebuild_mto_progress_for_line: {e}\n{traceback.format_exc()}")
         finally:
             session.close()
 
@@ -454,6 +466,18 @@ class DataManager:
                 MIVRecord.line_no == line_no
             ).all()
             return records
+        finally:
+            session.close()
+
+    def get_mto_item_by_id(self, mto_item_id: int):
+        """یک آیتم MTO را بر اساس شناسه اصلی آن برمی‌گرداند."""
+        session = self.get_session()
+        try:
+            # از session.get برای دسترسی مستقیم و سریع به آیتم با ID استفاده می‌کنیم
+            return session.get(MTOItem, mto_item_id)
+        except Exception as e:
+            logging.error(f"Error fetching MTO item with id {mto_item_id}: {e}")
+            return None
         finally:
             session.close()
 
@@ -840,10 +864,6 @@ class DataManager:
             session.close()
 
     def initialize_mto_progress_for_line(self, project_id, line_no):
-        """
-        برای یک خط که هنوز رکوردی در MTOProgress ندارد، رکوردهای اولیه را ایجاد می‌کند.
-        این تابع زمانی فراخوانی می‌شود که برای اولین بار اطلاعات یک خط درخواست می‌شود.
-        """
         session = self.get_session()
         try:
             mto_items = session.query(MTOItem).filter(
@@ -852,18 +872,15 @@ class DataManager:
             ).all()
 
             for item in mto_items:
-                # چک می‌کند که آیا رکوردی برای این آیتم وجود دارد یا نه
-                exists = session.query(MTOProgress).filter(
-                    MTOProgress.mto_item_id == item.id
-                ).first()
-
+                exists = session.query(MTOProgress).filter(MTOProgress.mto_item_id == item.id).first()
                 if not exists:
-                    if item.item_type and 'pipe' in item.item_type.lower():
-                        total_required = item.length_m or 0
+                    # --- CHANGE: حذف تبدیل واحد ---
+                    is_pipe = item.item_type and 'pipe' in item.item_type.lower()
+                    if is_pipe:
+                        total_required = item.length_m or 0 # دیگر ضرب در ۱۰۰۰ نداریم
                     else:
                         total_required = item.quantity or 0
 
-                    # مصرف قبلی را محاسبه کن (فقط برای بار اول)
                     total_used = session.query(func.coalesce(func.sum(MTOConsumption.used_qty), 0.0)) \
                         .filter(MTOConsumption.mto_item_id == item.id).scalar()
 
@@ -874,9 +891,9 @@ class DataManager:
                         item_code=item.item_code,
                         description=item.description,
                         unit=item.unit,
-                        total_qty=total_required,
-                        used_qty=total_used,
-                        remaining_qty=max(0, total_required - total_used),
+                        total_qty=round(total_required, 2),
+                        used_qty=round(total_used, 2),
+                        remaining_qty=round(max(0, total_required - total_used), 2),
                         last_updated=datetime.now()
                     )
                     session.add(new_progress)
@@ -1108,31 +1125,42 @@ class DataManager:
 
     def get_mapped_spool_items(self, mto_item_type, p1_bore):
         """
-        آیتم‌های اسپول را بر اساس یک دیکشنری نگاشت برای نوع کامپوننت و سایز (Bore) فیلتر می‌کند.
-        همچنان از joinedload برای جلوگیری از کرش برنامه استفاده می‌کند.
+        آیتم‌های اسپول را بر اساس دیکشنری نگاشت برای نوع کامپوننت و سایز (Bore) فیلتر می‌کند.
+        تطبیق به‌صورت انعطاف‌پذیر (startswith/contains) انجام می‌شود.
         """
         session = self.get_session()
         try:
-            # پیدا کردن لیست معادل‌ها از دیکشنری
-            # اگر تایپ در دیکشنری نبود، خود آن تایپ را برای جستجو در نظر می‌گیرد
-            spool_equivalents = SPOOL_TYPE_MAPPING.get(
-                str(mto_item_type).upper(),  # جستجو به صورت case-insensitive
-                (mto_item_type,)  # مقدار پیش‌فرض در صورت عدم وجود در دیکشنری
-            )
+            if not mto_item_type:
+                return []
+
+            mto_type_upper = str(mto_item_type).upper().strip()
+            spool_equivalents = [mto_type_upper]  # همیشه خود آیتم را به عنوان یک احتمال در نظر بگیر
+
+            # 🔹 جستجو در دیکشنری نگاشت برای پیدا کردن معادل‌ها
+            for key, aliases in SPOOL_TYPE_MAPPING.items():
+                # اگر نوع MTO با یکی از کلیدها یا معادل‌های آن یکی بود
+                if mto_type_upper == key or mto_type_upper in aliases:
+                    spool_equivalents.extend([key] + list(aliases))
+                    break # وقتی گروه درست پیدا شد، از حلقه خارج شو
+
+            # حذف موارد تکراری از لیست معادل‌ها
+            spool_equivalents = list(set(spool_equivalents))
 
             query = session.query(SpoolItem).options(
                 joinedload(SpoolItem.spool)
             ).filter(
-                SpoolItem.qty_available > 0,
-                # استفاده از in_ برای جستجو در لیست معادل‌ها
-                SpoolItem.component_type.in_(spool_equivalents)
+                # شرط: موجودی بزرگتر از صفر باشد
+                (SpoolItem.qty_available > 0.001) | (SpoolItem.length > 0.001),
+                # شرط: نوع کامپوننت یکی از موارد موجود در لیست معادل‌ها باشد
+                func.upper(SpoolItem.component_type).in_(spool_equivalents)
             )
 
-            # فیلتر بر اساس سایز (Bore)
+            # فیلتر بر اساس سایز (Bore) اگر مشخص شده بود
             if p1_bore is not None:
                 query = query.filter(SpoolItem.p1_bore == p1_bore)
 
             return query.all()
+
         except Exception as e:
             logging.error(f"Error fetching mapped spool items: {e}")
             return []
@@ -1156,7 +1184,7 @@ class DataManager:
                 spool_item_id = consumption['spool_item_id']
                 used_qty = consumption['used_qty']
 
-                spool_item = session.query(SpoolItem).get(spool_item_id)
+                spool_item = session.get(SpoolItem, spool_item_id)
                 if not spool_item:
                     raise Exception(f"آیتم اسپول با شناسه {spool_item_id} یافت نشد.")
 
@@ -1204,40 +1232,65 @@ class DataManager:
         finally:
             session.close()
 
+    def _get_matching_mto_progress_for_spool(self, session, spool_item, project_id, line_no):
+        """
+        یک تابع کمکی برای پیدا کردن رکورد MTOProgress متناظر با یک آیتم اسپول.
+        تطبیق بر اساس Type و Bore انجام می‌شود.
+        """
+        mto_item_type = spool_item.component_type
+        p1_bore = spool_item.p1_bore
+
+        # پیدا کردن معادل‌های نوع کامپوننت
+        mto_type_upper = str(mto_item_type).upper().strip()
+        spool_equivalents = [mto_type_upper]
+        for key, aliases in SPOOL_TYPE_MAPPING.items():
+            if mto_type_upper == key or mto_type_upper in aliases:
+                spool_equivalents.extend([key] + list(aliases))
+                break
+        spool_equivalents = list(set(spool_equivalents))
+
+        # جستجو برای پیدا کردن MTOItem متناظر
+        mto_item_query = session.query(MTOItem).filter(
+            MTOItem.project_id == project_id,
+            MTOItem.line_no == line_no,
+            func.upper(MTOItem.item_type).in_(spool_equivalents)
+        )
+        if p1_bore is not None:
+            mto_item_query = mto_item_query.filter(MTOItem.p1_bore_in == p1_bore)
+
+        mto_item = mto_item_query.first()
+
+        if mto_item:
+            # پیدا کردن رکورد MTOProgress مربوط به آن MTOItem
+            return session.query(MTOProgress).filter(MTOProgress.mto_item_id == mto_item.id).first()
+
+        return None
+
+
     # --------------------------------------------------------------------
     # متدهای لازم برای  مدیریت اسپول ها
     # --------------------------------------------------------------------
-    def get_spool_by_id(self, spool_id: str):
-        """برگرداندن یک اسپول به همراه آیتم‌هایش"""
-        session = self.get_session()
-        try:
-            spool = session.query(Spool).filter(Spool.spool_id == spool_id).first()
-            return spool
-        finally:
-            session.close()
-
     def create_spool(self, spool_data: dict, items_data: list[dict]) -> Tuple[bool, str]:
-        """ایجاد یک اسپول جدید همراه با آیتم‌هایش (با پشتیبانی از لوکیشن و آیتم کد)."""
+        """
+        یک اسپول جدید همراه با آیتم‌هایش ایجاد می‌کند.
+        - عملکرد: صحیح. ابتدا وجود اسپول تکراری را چک می‌کند، سپس اسپول و آیتم‌هایش را می‌سازد.
+        """
         session = self.get_session()
         try:
+            # بررسی تکراری نبودن شناسه اسپول
             existing_spool = session.query(Spool.id).filter(Spool.spool_id == spool_data["spool_id"]).first()
             if existing_spool:
                 return False, f"اسپولی با شناسه '{spool_data['spool_id']}' از قبل وجود دارد."
 
-            # ✨ CHANGE: .get("location") اضافه شد تا مقدار لوکیشن از ورودی خوانده شود
             new_spool = Spool(
                 spool_id=spool_data["spool_id"],
-                row_no=spool_data.get("row_no"),
-                line_no=spool_data.get("line_no"),
-                sheet_no=spool_data.get("sheet_no"),
-                location=spool_data.get("location"),  # <--- اینجا
-                command=spool_data.get("command")
+                location=spool_data.get("location"),
+                # فیلدهای دیگر در صورت نیاز می‌توانند اضافه شوند
             )
             session.add(new_spool)
-            session.flush()
+            session.flush()  # برای گرفتن ID اسپول جدید
 
             for item in items_data:
-                # ✨ CHANGE: .get("item_code") اضافه شد تا مقدار آیتم کد خوانده شود
                 new_item = SpoolItem(
                     spool_id_fk=new_spool.id,
                     component_type=item.get("component_type"),
@@ -1246,10 +1299,9 @@ class DataManager:
                     p2_bore=item.get("p2_bore"),
                     material=item.get("material"),
                     schedule=item.get("schedule"),
-                    thickness=item.get("thickness"),
                     length=item.get("length"),
                     qty_available=item.get("qty_available"),
-                    item_code=item.get("item_code")  # <--- اینجا
+                    item_code=item.get("item_code")
                 )
                 session.add(new_item)
 
@@ -1263,23 +1315,27 @@ class DataManager:
             session.close()
 
     def update_spool(self, spool_id: str, updated_data: dict, items_data: list[dict]) -> Tuple[bool, str]:
-        """آپدیت اطلاعات یک اسپول و آیتم‌هایش (با پشتیبانی از لوکیشن و آیتم کد)."""
+        """
+        اطلاعات یک اسپول و تمام آیتم‌های آن را به‌روزرسانی می‌کند.
+        - عملکرد: صحیح. اسپول را پیدا کرده، فیلدهایش را آپدیت می‌کند، آیتم‌های قدیمی را کاملاً پاک کرده و آیتم‌های جدید را جایگزین می‌کند.
+        """
         session = self.get_session()
         try:
             spool = session.query(Spool).filter(Spool.spool_id == spool_id).first()
             if not spool:
                 return False, "اسپول یافت نشد."
 
-            # آپدیت فیلدهای اصلی اسپول (شامل location)
+            # آپدیت فیلدهای اصلی اسپول (مانند لوکیشن)
             for key, value in updated_data.items():
                 if hasattr(spool, key):
                     setattr(spool, key, value)
 
-            # پاک کردن آیتم‌های قدیمی و جایگزینی با آیتم‌های جدید
+            # پاک کردن آیتم‌های قدیمی
             session.query(SpoolItem).filter(SpoolItem.spool_id_fk == spool.id).delete()
+            session.flush()
 
+            # افزودن آیتم‌های جدید
             for item in items_data:
-                # ✨ CHANGE: اطمینان از خواندن تمام فیلدها از جمله item_code
                 new_item = SpoolItem(
                     spool_id_fk=spool.id,
                     component_type=item.get("component_type"),
@@ -1288,10 +1344,9 @@ class DataManager:
                     p2_bore=item.get("p2_bore"),
                     material=item.get("material"),
                     schedule=item.get("schedule"),
-                    thickness=item.get("thickness"),
                     length=item.get("length"),
                     qty_available=item.get("qty_available"),
-                    item_code=item.get("item_code")  # <--- اینجا
+                    item_code=item.get("item_code")
                 )
                 session.add(new_item)
 
@@ -1305,73 +1360,68 @@ class DataManager:
             session.close()
 
     def generate_next_spool_id(self) -> str:
-        """تولید Spool ID بعدی با روشی قوی‌تر و با استفاده از regular expressions."""
+        """
+        یک شناسه جدید برای اسپول بر اساس آخرین شناسه موجود تولید می‌کند.
+        - عملکرد: صحیح و قوی. با استفاده از regex عدد را از انتهای آخرین شناسه استخراج و یکی به آن اضافه می‌کند.
+        """
         session = self.get_session()
         try:
+            # برای پیدا کردن آخرین رکورد، بر اساس ID که همیشه صعودی است مرتب می‌کنیم
             last_spool = session.query(Spool).order_by(Spool.id.desc()).first()
             if not last_spool:
                 return "S001"
 
-            # CHANGE: روش قوی‌تر برای استخراج شماره
             last_id = last_spool.spool_id
-            numeric_part = re.findall(r'\d+', last_id)
+            # پیدا کردن تمام اعداد در شناسه
+            numeric_parts = re.findall(r'\d+', last_id)
 
-            next_num = 0
-            if numeric_part:
-                # استفاده از آخرین عدد پیدا شده در شناسه
-                next_num = int(numeric_part[-1]) + 1
+            if numeric_parts:
+                # آخرین عدد پیدا شده را یکی اضافه کن
+                next_num = int(numeric_parts[-1]) + 1
             else:
-                # اگر هیچ عددی پیدا نشد، از id خود رکورد استفاده کن
+                # اگر هیچ عددی در شناسه نبود، از ID خود رکورد استفاده کن
                 next_num = last_spool.id + 1
 
+            # فرمت‌دهی به صورت سه رقمی (e.g., S001, S012, S123)
             return f"S{next_num:03d}"
         except Exception as e:
             logging.error(f"Error generating next spool ID: {e}")
-            # در صورت بروز خطای پیش‌بینی نشده، یک شناسه امن برگردان
             return f"S_ERR_{datetime.now().microsecond}"
         finally:
             session.close()
 
     def get_spool_by_id(self, spool_id: str):
-        """برگرداندن یک اسپول به همراه آیتم‌هایش با استفاده از joinedload برای جلوگیری از خطای session."""
+        """
+        یک اسپول را به همراه تمام آیتم‌های مرتبط با آن برمی‌گرداند.
+        - عملکرد: صحیح. استفاده از joinedload باعث می‌شود آیتم‌ها همراه با خود اسپول در یک کوئری خوانده شوند که بهینه است.
+        """
         session = self.get_session()
         try:
-            # CHANGE: .options(joinedload(Spool.items)) اضافه شده است
-            # این کد اسپول و تمام آیتم‌های آن را در یک کوئری واکشی می‌کند
             spool = session.query(Spool).filter(Spool.spool_id == spool_id).options(joinedload(Spool.items)).first()
             return spool
         finally:
-            session.close()
+            session.close()  # بستن سشن در هر صورت ضروری است
 
     def export_spool_data_to_excel(self, file_path: str) -> Tuple[bool, str]:
         """
-        داده‌های سه جدول Spool, SpoolItem و SpoolConsumption را در یک فایل اکسل با شیت‌های جداگانه ذخیره می‌کند.
+        داده‌های جداول Spool, SpoolItem و SpoolConsumption را به شیت‌های مجزا در یک فایل اکسل خروجی می‌دهد.
+        - عملکرد: صحیح. از کتابخانه پانداز برای خواندن مستقیم از کوئری و نوشتن در اکسل استفاده می‌کند که کارآمد است.
         """
         session = self.get_session()
         try:
-            # 1. تعریف مدل‌ها (جداول) و نام شیت‌ها
             tables_to_export = {
                 "Spools": Spool,
                 "SpoolItems": SpoolItem,
                 "SpoolConsumptions": SpoolConsumption
             }
-
-            # 2. ایجاد یک فایل اکسل برای نوشتن داده‌ها
             with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-                # 3. حلقه برای خواندن هر جدول و نوشتن آن در یک شیت
                 for sheet_name, model_class in tables_to_export.items():
-                    # کوئری برای خواندن تمام داده‌های جدول
                     query = session.query(model_class)
-
-                    # تبدیل نتیجه کوئری به DataFrame با استفاده از Pandas
                     df = pd.read_sql(query.statement, session.bind)
-
-                    # نوشتن DataFrame در یک شیت جدید با نام مشخص شده
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
 
             self.log_activity("system", "EXPORT_TO_EXCEL", f"Spool data exported to {file_path}")
             return True, f"داده‌ها با موفقیت در فایل {file_path} ذخیره شدند."
-
         except Exception as e:
             logging.error(f"خطا در خروجی گرفتن اکسل: {e}")
             return False, f"خطا در ایجاد فایل اکسل: {e}"
@@ -1379,15 +1429,17 @@ class DataManager:
             session.close()
 
     def get_all_spool_ids(self) -> list[str]:
-        """تمام شناسه‌های اسپول موجود در دیتابیس را به صورت لیست برمی‌گرداند."""
+        """
+        لیستی از تمام شناسه‌های اسپول موجود را برمی‌گرداند.
+        - عملکرد: صحیح. کوئری ساده برای گرفتن تمام شناسه‌ها و تبدیل نتیجه به لیست رشته‌ها.
+        """
         session = self.get_session()
         try:
-            # کوئری برای انتخاب ستون spool_id از جدول Spool
             results = session.query(Spool.spool_id).order_by(Spool.spool_id).all()
-            # تبدیل لیست تاپل‌ها به لیست رشته‌ها
             return [item[0] for item in results]
         except Exception as e:
             logging.error(f"Error fetching all spool IDs: {e}")
             return []
         finally:
             session.close()
+

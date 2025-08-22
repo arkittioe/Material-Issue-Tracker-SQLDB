@@ -185,6 +185,21 @@ class SpoolConsumption(Base):
     spool_item = relationship("SpoolItem", back_populates="consumptions")
     spool = relationship("Spool", back_populates="consumptions")
 
+class SpoolProgress(Base):
+    __tablename__ = "spool_progress"
+
+    id = Column(Integer, primary_key=True)
+    spool_item_id = Column(Integer, ForeignKey("spool_items.id"))   # آیتم اسپول
+    spool_id = Column(Integer, ForeignKey("spools.id"))             # شماره اسپول
+    project_id = Column(Integer, ForeignKey("projects.id"))
+    line_no = Column(String)                                        # شماره خط آیتم MTO
+    item_code = Column(String)                                      # آیتم کد MTO که مصرف کرده
+
+    used_qty = Column(Float, default=0)                             # مصرف شده برای اون آیتم
+    remaining_qty = Column(Float, default=0)                        # باقی‌مانده اسپول
+    timestamp = Column(DateTime, default=datetime.now)
+
+
 # -------------------------
 # تابع ایجاد دیتابیس و جداول
 # -------------------------

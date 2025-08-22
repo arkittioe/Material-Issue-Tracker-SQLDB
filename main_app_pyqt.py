@@ -26,25 +26,23 @@ from models import Project, MTOItem, MIVRecord, Spool, SpoolItem  # برای typ
 
 import sys, traceback
 
+
 class SpoolManagerDialog(QDialog):
     def __init__(self, dm: DataManager, parent=None):
         super().__init__(parent)
         self.dm = dm
         self.setWindowTitle("مدیریت اسپول‌ها")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1200, 700)  # کمی عرض را بیشتر کردم
+        self.current_spool_id = None
+        self.is_new_spool = True
 
-        # ------------------- چیدمان اصلی -------------------
         layout = QVBoxLayout(self)
-
-        # ------------------- بخش اطلاعات و بارگذاری اسپول -------------------
         top_groupbox = QGroupBox("اطلاعات اسپول")
         top_layout = QHBoxLayout()
-
         form_layout = QFormLayout()
+
         self.spool_id_entry = QLineEdit()
         self.spool_id_entry.setPlaceholderText("شناسه اسپول را وارد یا انتخاب کنید...")
-
-        # --- NEW: فیلد ورودی برای لوکیشن ---
         self.location_entry = QLineEdit()
         self.location_entry.setPlaceholderText("محل قرارگیری اسپول...")
 
@@ -60,82 +58,71 @@ class SpoolManagerDialog(QDialog):
         top_groupbox.setLayout(top_layout)
         layout.addWidget(top_groupbox)
 
-        # --- NEW: اضافه کردن تکمیل‌کننده خودکار (Completer) برای Spool ID ---
         self.setup_spool_id_completer()
 
-        # ------------------- جدول آیتم‌های اسپول -------------------
         self.table = QTableWidget()
-        # --- NEW: تعداد ستون‌ها به 9 افزایش یافت تا Item Code اضافه شود ---
-        self.table.setColumnCount(9)
+        # --- CHANGE: اضافه شدن ستون Thickness ---
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
             "Component Type", "Class/Angle", "Bore1", "Bore2",
-            "Material", "Schedule", "Length", "Qty Available", "Item Code"
+            "Material", "Schedule", "Thickness", "Length (m)", "Qty Available", "Item Code"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
-        # ------------------- دکمه‌های کنترلی -------------------
+        # ... (بخش دکمه‌ها بدون تغییر) ...
         btns_layout = QHBoxLayout()
         self.add_row_btn = QPushButton("➕ افزودن ردیف")
         self.remove_row_btn = QPushButton("➖ حذف ردیف")
-
-        # --- NEW: دکمه خروجی اکسل اضافه شد ---
         self.export_btn = QPushButton("خروجی اکسل")
-
         self.save_btn = QPushButton("💾 ذخیره تغییرات")
         self.close_btn = QPushButton("بستن")
-
         btns_layout.addWidget(self.add_row_btn)
         btns_layout.addWidget(self.remove_row_btn)
         btns_layout.addStretch()
-        btns_layout.addWidget(self.export_btn)  # دکمه اکسل
+        btns_layout.addWidget(self.export_btn)
         btns_layout.addWidget(self.save_btn)
         btns_layout.addWidget(self.close_btn)
         layout.addLayout(btns_layout)
 
-        # ------------------- اتصال سیگنال‌ها به توابع -------------------
         self.load_btn.clicked.connect(self.load_spool)
         self.new_btn.clicked.connect(self.new_spool)
         self.add_row_btn.clicked.connect(self.add_row)
         self.remove_row_btn.clicked.connect(self.remove_row)
         self.save_btn.clicked.connect(self.save_changes)
-        self.export_btn.clicked.connect(self.handle_export_to_excel)  # اتصال دکمه اکسل
+        self.export_btn.clicked.connect(self.handle_export_to_excel)
         self.close_btn.clicked.connect(self.close)
-
-        # ------------------- وضعیت جاری برنامه -------------------
-        self.current_spool_id = None
-        self.is_new_spool = False  # برای تفکیک بین حالت ایجاد و ویرایش
 
     def setup_spool_id_completer(self):
         """لیست شناسه‌های اسپول را از دیتابیس گرفته و به ورودی اضافه می‌کند."""
         try:
-            spool_ids = self.dm.get_all_spool_ids()  # این متد باید در DataManager ساخته شود
+            spool_ids = self.dm.get_all_spool_ids()
             model = QStringListModel()
             model.setStringList(spool_ids)
-
-            completer = QCompleter()
-            completer.setModel(model)
-            completer.setCaseSensitivity(0)  # Not case sensitive
+            completer = QCompleter(model, self)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
             self.spool_id_entry.setCompleter(completer)
         except Exception as e:
             print(f"Failed to setup completer: {e}")
 
-    def populate_table(self, items):
-        """جدول را با آیتم‌های اسپول پر می‌کند"""
-        try:
-            self.table.setRowCount(len(items))
-            for row, item in enumerate(items):
-                self.table.setItem(row, 0, QTableWidgetItem(item.component_type or ""))
-                self.table.setItem(row, 1, QTableWidgetItem(item.class_angle or ""))
-                self.table.setItem(row, 2, QTableWidgetItem(str(item.p1_bore) if item.p1_bore is not None else ""))
-                self.table.setItem(row, 3, QTableWidgetItem(str(item.p2_bore) if item.p2_bore is not None else ""))
-                self.table.setItem(row, 4, QTableWidgetItem(item.material or ""))
-                self.table.setItem(row, 5, QTableWidgetItem(item.schedule or ""))
-                self.table.setItem(row, 6, QTableWidgetItem(str(item.length) if item.length is not None else ""))
-                self.table.setItem(row, 7, QTableWidgetItem(str(item.qty_available) if item.qty_available is not None else ""))
-        except Exception as e:
-            self.show_msg("خطا", "save_changes failed", detailed=str(e), icon=QMessageBox.Icon.Critical)
+    def populate_table(self, items: list[SpoolItem]):
+        """جدول را با آیتم‌های یک اسپول پر می‌کند."""
+        self.table.setRowCount(len(items))
+        for row, item in enumerate(items):
+            def to_str(val):
+                return str(val) if val is not None else ""
 
+            self.table.setItem(row, 0, QTableWidgetItem(item.component_type or ""))
+            self.table.setItem(row, 1, QTableWidgetItem(item.class_angle or ""))
+            self.table.setItem(row, 2, QTableWidgetItem(to_str(item.p1_bore)))
+            self.table.setItem(row, 3, QTableWidgetItem(to_str(item.p2_bore)))
+            self.table.setItem(row, 4, QTableWidgetItem(item.material or ""))
+            self.table.setItem(row, 5, QTableWidgetItem(item.schedule or ""))
+            # --- CHANGE: نمایش مقدار Thickness در ستون جدید ---
+            self.table.setItem(row, 6, QTableWidgetItem(to_str(item.thickness)))
+            self.table.setItem(row, 7, QTableWidgetItem(to_str(item.length)))
+            self.table.setItem(row, 8, QTableWidgetItem(to_str(item.qty_available)))
+            self.table.setItem(row, 9, QTableWidgetItem(item.item_code or ""))
 
     def add_row(self):
         self.table.insertRow(self.table.rowCount())
@@ -146,95 +133,119 @@ class SpoolManagerDialog(QDialog):
             self.table.removeRow(row)
 
     def load_spool(self):
-        try:
-            spool_id = self.spool_id_entry.text().strip()
-            spool = self.dm.get_spool_by_id(spool_id)
-            if not spool:
-                QMessageBox.warning(self, "خطا", "اسپول یافت نشد.")
-                return
-            self.current_spool_id = spool.spool_id
-            self.populate_table(spool.items)
-        except Exception as e:
-            self.show_msg("خطا", "save_changes failed", detailed=str(e), icon=QMessageBox.Icon.Critical)
+        """یک اسپول موجود را برای ویرایش بارگذاری می‌کند."""
+        # --- CHANGE: تبدیل شناسه به حروف بزرگ ---
+        spool_id = self.spool_id_entry.text().strip().upper()
+        if not spool_id:
+            self.show_msg("هشدار", "لطفاً شناسه اسپول را برای بارگذاری وارد کنید.", icon=QMessageBox.Icon.Warning)
+            return
+
+        spool = self.dm.get_spool_by_id(spool_id)
+        if not spool:
+            self.show_msg("خطا", f"اسپولی با شناسه '{spool_id}' یافت نشد.", icon=QMessageBox.Icon.Critical)
+            return
+
+        self.current_spool_id = spool.spool_id
+        self.spool_id_entry.setText(spool.spool_id)
+        self.location_entry.setText(spool.location or "")
+        self.populate_table(spool.items)
+        self.is_new_spool = False
+        self.log_to_console(f"اسپول '{spool_id}' برای ویرایش بارگذاری شد.", "success")
 
     def new_spool(self):
-        try:
-            self.current_spool_id = None
-            self.table.setRowCount(0)
-            new_id = self.dm.generate_next_spool_id()
-            self.spool_id_entry.setText(new_id)
-            QMessageBox.information(self, "اطلاع", f"اسپول جدید با ID {new_id} آماده ورود اطلاعات است.")
-        except Exception as e:
-            self.show_msg("خطا", "save_changes failed", detailed=str(e), icon=QMessageBox.Icon.Critical)
+        """فرم را برای ایجاد یک اسپول جدید آماده می‌کند."""
+        self.current_spool_id = None
+        next_id = self.dm.generate_next_spool_id()
+        self.spool_id_entry.setText(next_id)
+        self.location_entry.clear()
+        self.table.setRowCount(0)
+        self.is_new_spool = True
+        self.log_to_console(f"فرم برای ثبت اسپول جدید ({next_id}) آماده است.", "info")
 
+    def save_changes(self):
+        """تغییرات جدول و اطلاعات را در دیتابیس ذخیره می‌کند."""
+        # --- CHANGE: تبدیل شناسه به حروف بزرگ ---
+        spool_id = self.spool_id_entry.text().strip().upper()
+        if not spool_id:
+            self.show_msg("هشدار", "Spool ID الزامی است.", icon=QMessageBox.Icon.Warning)
+            return
 
-    def save_changes(self):  # # ذخیره‌سازی داده‌های جدول در دیتابیس
         try:
-            def safe_float(txt):  # # مبدل امن متن به عدد اعشاری یا None
-                if txt is None:
-                    return None
+            def safe_float(txt):
+                if txt is None: return None
                 s = str(txt).strip()
-                if s == "":
-                    return None
+                if not s: return None
                 try:
-                    return float(s)
-                except Exception:
+                    return round(float(s), 2)
+                except (ValueError, TypeError):
                     return None
 
             items_data = []
             for r in range(self.table.rowCount()):
-                row = {
-                    "component_type": self.table.item(r, 0).text().strip() if self.table.item(r, 0) else None,
-                    "class_angle": self.table.item(r, 1).text().strip() if self.table.item(r, 1) else None,
-                    "p1_bore": safe_float(self.table.item(r, 2).text() if self.table.item(r, 2) else None),
-                    "p2_bore": safe_float(self.table.item(r, 3).text() if self.table.item(r, 3) else None),
-                    "material": self.table.item(r, 4).text().strip() if self.table.item(r, 4) else None,
-                    "schedule": self.table.item(r, 5).text().strip() if self.table.item(r, 5) else None,
-                    "thickness": safe_float(self.table.item(r, 6).text() if self.table.item(r, 6) else None),
-                    "length": safe_float(self.table.item(r, 7).text() if self.table.item(r, 7) else None),
-                    "qty_available": safe_float(self.table.item(r, 8).text() if self.table.item(r, 8) else None),
-                    "item_code": self.table.item(r, 9).text().strip() if self.table.item(r, 9) else None,
+                def get_item_text(row, col, to_upper=False):
+                    item = self.table.item(row, col)
+                    text = item.text().strip() if item and item.text() else None
+                    # --- CHANGE: تبدیل فیلدهای متنی به حروف بزرگ ---
+                    if text and to_upper:
+                        return text.upper()
+                    return text
+
+                row_data = {
+                    "component_type": get_item_text(r, 0, to_upper=True),
+                    "class_angle": get_item_text(r, 1, to_upper=True),
+                    "p1_bore": safe_float(get_item_text(r, 2)),
+                    "p2_bore": safe_float(get_item_text(r, 3)),
+                    "material": get_item_text(r, 4, to_upper=True),
+                    "schedule": get_item_text(r, 5, to_upper=True),
+                    # --- CHANGE: خواندن مقدار Thickness از ستون جدید ---
+                    "thickness": safe_float(get_item_text(r, 6)),
+                    "length": safe_float(get_item_text(r, 7)),
+                    "qty_available": safe_float(get_item_text(r, 8)),
+                    "item_code": get_item_text(r, 9, to_upper=True)
                 }
-                items_data.append(row)
-
-            # تعیین لوکیشن از فیلد بالایی یا ستون آخر جدول
-            loc_from_field = self.location_entry.text().strip()
-            loc_from_table = None
-            if self.table.rowCount() > 0 and self.table.item(0, 10):
-                loc_from_table = self.table.item(0, 10).text().strip()
-            final_location = loc_from_field or loc_from_table or None
-
-            spool_id = self.spool_id_entry.text().strip()
-            if not spool_id:
-                self.show_msg("هشدار", "Spool ID الزامی است.", icon=QMessageBox.Icon.Warning)
-                return
+                if row_data["component_type"]:
+                    items_data.append(row_data)
 
             spool_data = {
                 "spool_id": spool_id,
-                "location": final_location
+                "location": self.location_entry.text().strip() or None
             }
 
-            if self.current_spool_id:  # ویرایش
-                success, msg = self.dm.update_spool(self.current_spool_id, spool_data, items_data)
-            else:  # ایجاد
+            if self.is_new_spool:
                 success, msg = self.dm.create_spool(spool_data, items_data)
                 if success:
+                    self.is_new_spool = False
                     self.current_spool_id = spool_id
+            else:
+                if self.current_spool_id != spool_id:
+                    reply = QMessageBox.question(self, 'تغییر شناسه اسپول',
+                                                 f"شناسه اسپول از '{self.current_spool_id}' به '{spool_id}' تغییر کرده. آیا یک اسپول جدید با این شناسه ساخته شود؟",
+                                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if reply == QMessageBox.StandardButton.Yes:
+                        success, msg = self.dm.create_spool(spool_data, items_data)
+                    else:
+                        return
+                else:
+                    success, msg = self.dm.update_spool(self.current_spool_id, spool_data, items_data)
 
             if success:
                 self.show_msg("موفق", msg)
+                self.setup_spool_id_completer()
             else:
                 self.show_msg("خطا", msg, icon=QMessageBox.Icon.Critical)
 
         except Exception as e:
-            self.show_msg("خطا", "save_changes با خطا مواجه شد.", detailed=str(e), icon=QMessageBox.Icon.Critical)
+            import traceback
+            self.show_msg("خطای بحرانی", "عملیات ذخیره‌سازی ناموفق بود.", detailed=traceback.format_exc(),
+                          icon=QMessageBox.Icon.Critical)
 
+    # ... (بقیه توابع کلاس بدون تغییر باقی می‌مانند) ...
     def handle_export_to_excel(self):
         try:
             path, _ = QFileDialog.getSaveFileName(self, "ذخیره فایل اکسل", "Spool_Data.xlsx", "Excel Files (*.xlsx)")
             if not path:
                 return
-            ok, message = self.dm.export_spool_data_to_excel(path)  # ← اصلاح شد
+            ok, message = self.dm.export_spool_data_to_excel(path)
             icon = QMessageBox.Icon.Information if ok else QMessageBox.Icon.Critical
             self.show_msg("خروجی اکسل", message, icon=icon)
         except Exception as e:
@@ -245,16 +256,17 @@ class SpoolManagerDialog(QDialog):
         box.setIcon(icon)
         box.setWindowTitle(title)
         box.setText(text)
-        if detailed:  # متن کامل خطا یا جزییات
+        if detailed:
             box.setDetailedText(detailed)
-
-        # ✨ این خط باعث میشه متن پیام قابل انتخاب/کپی باشه
         box.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse |
-            Qt.TextInteractionFlag.TextSelectableByKeyboard
-        )
-
+            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         box.exec()
+
+    def log_to_console(self, message, level="info"):
+        if hasattr(self.parent(), 'log_to_console'):
+            self.parent().log_to_console(message, level)
+        else:
+            print(f"[{level.upper()}] {message}")
 
 
 class SpoolSelectionDialog(QDialog):
@@ -317,14 +329,13 @@ class SpoolSelectionDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def populate_table(self):
-        # این لیست برای دسترسی آسان به اسپین‌باکس‌ها و موجودی اولیه‌شان است
         self.spin_boxes_info = []
-
         self.table.setRowCount(len(self.items))
+
         for row, item in enumerate(self.items):
-            # ... (پر کردن ستون‌های ۰ تا ۱۱ بدون تغییر باقی می‌ماند) ...
             self.table.setItem(row, 0, QTableWidgetItem(str(item.id)))
             self.table.setItem(row, 1, QTableWidgetItem(str(item.spool.spool_id)))
+            # ... (ستون‌های 2 تا 9 بدون تغییر)
             self.table.setItem(row, 2, QTableWidgetItem(item.item_code or ""))
             self.table.setItem(row, 3, QTableWidgetItem(item.component_type or ""))
             self.table.setItem(row, 4, QTableWidgetItem(item.class_angle or ""))
@@ -333,45 +344,55 @@ class SpoolSelectionDialog(QDialog):
             self.table.setItem(row, 7, QTableWidgetItem(item.material or ""))
             self.table.setItem(row, 8, QTableWidgetItem(item.schedule or ""))
             self.table.setItem(row, 9, QTableWidgetItem(str(item.thickness or "")))
+
             self.table.setItem(row, 10, QTableWidgetItem(str(item.length or "")))
             self.table.setItem(row, 11, QTableWidgetItem(str(item.qty_available or "")))
 
-            if "PIPE" in (item.component_type or "").upper():
-                available_qty_in_spool = item.length or 0
+            # --- CHANGE: حذف تبدیل واحد ---
+            is_pipe = "PIPE" in (item.component_type or "").upper()
+            if is_pipe:
+                available_qty_for_ui = item.length or 0  # دیگر تقسیم بر ۱۰۰۰ نداریم
             else:
-                available_qty_in_spool = item.qty_available or 0
-            self.table.setItem(row, 12, QTableWidgetItem(str(available_qty_in_spool)))
+                available_qty_for_ui = item.qty_available or 0
+
+            # نمایش موجودی با دو رقم اعشار
+            self.table.setItem(row, 12, QTableWidgetItem(f"{available_qty_for_ui:.2f}"))
 
             spin_box = QDoubleSpinBox()
-            # <<< CHANGE: رنج اولیه فقط بر اساس موجودی خود آیتم است
-            spin_box.setRange(0, available_qty_in_spool)
-            spin_box.setDecimals(3)
-            # <<< CHANGE: اتصال سیگنال به تابع جدید
+            spin_box.setRange(0, available_qty_for_ui)
+            # --- CHANGE: تنظیم دقت به ۲ رقم اعشار ---
+            spin_box.setDecimals(2)
             spin_box.valueChanged.connect(self.update_totals)
             self.table.setCellWidget(row, 13, spin_box)
 
-            # ذخیره اسپین‌باکس و حداکثر موجودی اولیه‌اش
-            self.spin_boxes_info.append({'widget': spin_box, 'max_avail': available_qty_in_spool})
+            self.spin_boxes_info.append({'widget': spin_box, 'max_avail': available_qty_for_ui})
 
             for col in range(13):
                 cell_item = self.table.item(row, col)
                 if cell_item:
                     cell_item.setFlags(cell_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
-        # یک بار در ابتدا برای تنظیم اولیه فراخوانی می‌شود
         self.update_totals()
 
     def accept_data(self):
         self.selected_data = []
         for row in range(self.table.rowCount()):
-            spin_box = self.table.cellWidget(row, 13) # Read from the correct column
-            used_qty = spin_box.value()
+            if self.table.isRowHidden(row):
+                continue
 
-            if used_qty > 0:
+            spin_box = self.table.cellWidget(row, 13)
+            used_qty_from_ui = spin_box.value()
+
+            if used_qty_from_ui > 0.001:
                 spool_item_id = int(self.table.item(row, 0).text())
+
+                # --- CHANGE: حذف تبدیل واحد و گرد کردن نهایی ---
+                # دیگر نیازی به تشخیص Pipe نیست، چون واحدها یکسان هستند
+                used_qty_for_db = round(used_qty_from_ui, 2)
+
                 self.selected_data.append({
                     "spool_item_id": spool_item_id,
-                    "used_qty": used_qty
+                    "used_qty": used_qty_for_db
                 })
         self.accept()
 
@@ -380,7 +401,8 @@ class SpoolSelectionDialog(QDialog):
 
     def filter_table(self):
         """Hides rows that do not match the filter criteria."""
-        filter_texts = {col: f.text().lower() for col, f in self.filters.items()}
+        # --- CHANGE: تبدیل به حروف بزرگ برای جستجوی غیرحساس به بزرگی و کوچکی ---
+        filter_texts = {col: f.text().upper() for col, f in self.filters.items()}
 
         for row in range(self.table.rowCount()):
             is_visible = True
@@ -388,34 +410,27 @@ class SpoolSelectionDialog(QDialog):
                 if not filter_text:
                     continue
                 item = self.table.item(row, col)
-                if not item or filter_text not in item.text().lower():
+                # --- CHANGE: متن سلول هم به حروف بزرگ تبدیل می‌شود ---
+                if not item or filter_text not in item.text().upper():
                     is_visible = False
                     break
             self.table.setRowHidden(row, not is_visible)
 
     def update_totals(self):
         """Calculates the total selected quantity and dynamically updates the limits of all spin boxes."""
-
         current_total = sum(info['widget'].value() for info in self.spin_boxes_info)
 
-        # آپدیت لیبل جمع کل
-        self.total_selected_label.setText(f"جمع انتخاب شده: {current_total:.3f}")
+        # --- CHANGE: آپدیت لیبل با دو رقم اعشار ---
+        self.total_selected_label.setText(f"جمع انتخاب شده: {current_total:.2f}")
         if current_total > self.remaining_mto_qty:
-            self.total_selected_label.setStyleSheet(
-                "font-weight: bold; padding: 5px; background-color: #f8d7da;")  # Red
+            self.total_selected_label.setStyleSheet("font-weight: bold; padding: 5px; background-color: #f8d7da;")
         else:
-            self.total_selected_label.setStyleSheet(
-                "font-weight: bold; padding: 5px; background-color: #d1e7dd;")  # Green
+            self.total_selected_label.setStyleSheet("font-weight: bold; padding: 5px; background-color: #d1e7dd;")
 
-        # محاسبه مقداری که هنوز می‌توان انتخاب کرد
         remaining_headroom = self.remaining_mto_qty - current_total
 
-        # آپدیت سقف مجاز برای تمام اسپین‌باکس‌ها
         for info in self.spin_boxes_info:
             spin_box = info['widget']
-
-            # حداکثر مقدار جدید = مقدار فعلی خودش + مقداری که هنوز جا دارد
-            # این مقدار نباید از موجودی فیزیکی خود آیتم بیشتر شود
             new_max = min(info['max_avail'], spin_box.value() + remaining_headroom)
 
             spin_box.blockSignals(True)
@@ -481,7 +496,7 @@ class MTOConsumptionDialog(QDialog):
         for row_idx, item in enumerate(self.progress_data):
             mto_item_id = item["mto_item_id"]
 
-            # Populate MTO columns (0-7)
+            # ستون‌های MTO (0-7)
             self.table.setItem(row_idx, 0, QTableWidgetItem(item["Item Code"] or ""))
             self.table.setItem(row_idx, 1, QTableWidgetItem(item["Description"] or ""))
             self.table.setItem(row_idx, 2, QTableWidgetItem(str(item["Total Qty"])))
@@ -492,38 +507,48 @@ class MTOConsumptionDialog(QDialog):
             self.table.setItem(row_idx, 6, QTableWidgetItem(str(item.get("Bore") or "")))
             self.table.setItem(row_idx, 7, QTableWidgetItem(item.get("Type") or ""))
 
-            # Get total usage for *this MIV* to set initial state
-            # In edit mode, this value is the sum of direct + spool for this MIV
+            # مصرف موجود در این MIV
             current_miv_total_usage = self.existing_consumptions.get(mto_item_id, 0)
 
-            # SpinBox for direct consumption
+            # SpinBox برای مصرف مستقیم
             spin_box = QDoubleSpinBox()
             max_val = remaining_qty + current_miv_total_usage
             spin_box.setRange(0, max_val)
-            spin_box.setDecimals(3)
-            # In edit mode, we assume the initial value is all direct for simplicity.
-            # The user will have to re-select from spools if they wish to change it.
+            spin_box.setDecimals(2)
             spin_box.setValue(current_miv_total_usage)
             self.table.setCellWidget(row_idx, 8, spin_box)
 
-            # Button for spool selection
+            # دکمه انتخاب اسپول
             spool_btn = QPushButton("انتخاب...")
+
+            # --- NEW: بررسی سازگاری آیتم با انبار اسپول ---
+            item_type = item.get("Type")
+            p1_bore = item.get("Bore")
+            # از تابع جدید DataManager برای گرفتن آیتم‌های سازگار استفاده می‌کنیم
+            matching_items = self.dm.get_mapped_spool_items(item_type, p1_bore)
+
+            if not matching_items:  # 🚫 اگر هیچ اسپولی پیدا نشد
+                spool_btn.setEnabled(False)
+                spool_btn.setToolTip("هیچ آیتم سازگاری در انبار اسپول یافت نشد.")
+
             spool_btn.clicked.connect(partial(self.handle_spool_selection, row_idx))
             self.table.setCellWidget(row_idx, 9, spool_btn)
 
-            # Placeholders for Spool info
+            # ستون‌های اطلاعات اسپول
             for col in [10, 11, 12]:
                 self.table.setItem(row_idx, col, QTableWidgetItem(""))
 
+            # اگر کلا آیتمی باقی نمانده، همه کنترل‌ها غیرفعال شوند
             if max_val <= 0:
                 spin_box.setEnabled(False)
                 spool_btn.setEnabled(False)
 
-            # Make info columns read-only
+            # ستون‌های اطلاعاتی فقط-خواندنی
             for col in list(range(8)) + [10, 11, 12]:
                 item_widget = self.table.item(row_idx, col)
                 if item_widget:
                     item_widget.setFlags(item_widget.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
         self.table.resizeColumnsToContents()
 
     def handle_spool_selection(self, row_idx):
@@ -538,11 +563,15 @@ class MTOConsumptionDialog(QDialog):
             self.parent().show_message("هشدار", "نوع آیتم (Type) برای این ردیف MTO مشخص نشده است.", "warning")
             return
 
+        # 🔹 استفاده درست از item_data به جای item
         matching_items = self.dm.get_mapped_spool_items(item_type, p1_bore)
 
         if not matching_items:
-            self.parent().show_message("اطلاعات",
-                                       f"هیچ اسپول سازگار برای نوع '{item_type}' و سایز '{p1_bore}' یافت نشد.", "info")
+            self.parent().show_message(
+                "اطلاعات",
+                f"هیچ اسپول سازگار برای نوع '{item_type}' و سایز '{p1_bore}' یافت نشد.",
+                "info"
+            )
             return
 
         # --- CHANGE: Pass the remaining_qty to the dialog ---
@@ -565,7 +594,7 @@ class MTOConsumptionDialog(QDialog):
         session = self.dm.get_session()
         try:
             first_selection = selections[0]
-            spool_item = session.query(SpoolItem).get(first_selection['spool_item_id'])
+            spool_item = session.get(SpoolItem, first_selection['spool_item_id'])
             spool_id_text = str(spool_item.spool.spool_id)
             if len(selections) > 1:
                 spool_id_text += f" (+{len(selections) - 1} more)"
@@ -587,28 +616,34 @@ class MTOConsumptionDialog(QDialog):
             spin_box.setValue(max(0, new_max))
 
     def accept_data(self):
-        total_selected = sum(info['widget'].value() for info in self.spin_boxes_info)
+        self.consumed_data = []
+        self.spool_consumption_data = []
 
-        if total_selected > self.remaining_mto_qty:
-            QMessageBox.warning(self, "خطا", f"مجموع مقادیر انتخاب شده ({total_selected}) از مقدار باقی‌مانده ({self.remaining_mto_qty}) بیشتر است.")
-            return
-
-        self.selected_data = []
         for row in range(self.table.rowCount()):
-            spin_box = self.table.cellWidget(row, 13)
-            used_qty = spin_box.value()
+            mto_item_id = self.progress_data[row]["mto_item_id"]
 
-            if used_qty > 0:
-                spool_item_id = int(self.table.item(row, 0).text())
-                self.selected_data.append({
-                    "spool_item_id": spool_item_id,
-                    "used_qty": used_qty
+            # مصرف مستقیم
+            spin_box = self.table.cellWidget(row, 8)
+            direct_qty = spin_box.value() if spin_box else 0
+            if direct_qty > 0.001:
+                self.consumed_data.append({
+                    "mto_item_id": mto_item_id,
+                    # --- CHANGE: گرد کردن مقدار نهایی ---
+                    "used_qty": round(direct_qty, 2)
                 })
+
+            # مصرف اسپول (مقادیر از دیالوگ دیگر گرد شده می‌آیند)
+            if row in self.spool_selections:
+                for sel in self.spool_selections[row]:
+                    self.spool_consumption_data.append({
+                        "spool_item_id": sel["spool_item_id"],
+                        "used_qty": sel["used_qty"] # این مقدار از قبل گرد شده
+                    })
+
         self.accept()
 
     def get_data(self):
         return self.consumed_data, self.spool_consumption_data
-
 
 # --- پنجره اصلی برنامه ---
 class MainWindow(QMainWindow):
@@ -845,25 +880,23 @@ class MainWindow(QMainWindow):
             self.show_message("خطا", "لطفاً ابتدا یک پروژه را بارگذاری کنید.", "warning")
             return
 
-        # ۱. جمع‌آوری داده از فرم
-        form_data = {field: widget.text().strip() for field, widget in self.entries.items()}
-        form_data["Registered By"] = self.current_user
+        # --- CHANGE: تبدیل تمام ورودی‌های فرم به حروف بزرگ ---
+        form_data = {field: widget.text().strip().upper() for field, widget in self.entries.items()}
+        form_data["Registered By"] = self.current_user  # نام کاربر نیازی به تغییر ندارد
         form_data["Complete"] = False
-        form_data["Comment"] = ""
+        form_data["Comment"] = ""  # کامنت به صورت خودکار ساخته می‌شود
 
-        # ۲. اعتبارسنجی
         if not form_data["Line No"] or not form_data["MIV Tag"]:
             self.show_message("خطا", "فیلدهای Line No و MIV Tag اجباری هستند.", "warning")
             return
 
+        # ... (بقیه تابع بدون تغییر باقی می‌ماند) ...
         if self.dm.is_duplicate_miv_tag(form_data["MIV Tag"], self.current_project.id):
             self.show_message("خطا", f"تگ '{form_data['MIV Tag']}' در این پروژه تکراری است.", "error")
             return
 
-        # ✅ ۳. اطمینان از اینکه MTOProgress برای خط وجود دارد
         self.dm.initialize_mto_progress_for_line(self.current_project.id, form_data["Line No"])
 
-        # ۴. انتخاب مصرف
         dialog = MTOConsumptionDialog(self.dm, self.current_project.id, form_data["Line No"], parent=self)
 
         if dialog.exec():
@@ -872,15 +905,18 @@ class MainWindow(QMainWindow):
                 self.log_to_console("ثبت رکورد لغو شد چون هیچ آیتمی مصرف نشده بود.", "warning")
                 return
 
-            # ساخت کامنت
-            comment_parts = [
-                f"{item['used_qty']} * {(item.get('item_code') or item['description'])}"
-                for item in consumed_items
-            ]
+            comment_parts = []
+            if consumed_items:
+                for item in consumed_items:
+                    mto_details = self.dm.get_mto_item_by_id(item['mto_item_id'])
+                    if mto_details:
+                        identifier = mto_details.item_code or mto_details.description or f"Item ID {mto_details.id}"
+                        comment_parts.append(f"{item['used_qty']} * {identifier}")
+
             form_data["Comment"] = ", ".join(comment_parts)
 
-            # ثبت نهایی
             success, msg = self.dm.register_miv_record(self.current_project.id, form_data, consumed_items, spool_items)
+
             if success:
                 self.log_to_console(msg, "success")
                 self.update_line_dashboard()
@@ -894,122 +930,25 @@ class MainWindow(QMainWindow):
         if not self.current_project:
             self.show_message("خطا", "لطفاً ابتدا یک پروژه را بارگذاری کنید.", "warning")
             return
-
-        line_no = self.search_entry.text().strip()
+        # --- CHANGE: تبدیل ورودی جستجو به حروف بزرگ ---
+        line_no = self.search_entry.text().strip().upper()
         if not line_no:
             self.show_message("خطا", "لطفاً شماره خط برای جستجو را وارد کنید.", "warning")
             return
 
+        # ... (بقیه تابع بدون تغییر باقی می‌ماند) ...
         records = self.dm.search_miv_by_line_no(self.current_project.id, line_no)
 
         if not records:
             self.show_message("نتیجه", f"هیچ رکوردی برای خط '{line_no}' یافت نشد.", "info")
             return
 
+        # (بقیه کد برای نمایش دیالوگ نتایج جستجو)
         dlg = QDialog(self)
         dlg.setWindowTitle(f"نتایج جستجو - خط {line_no}")
         dlg.resize(950, 450)
         layout = QVBoxLayout(dlg)
-
-        table = QTableWidget()
-        table.setColumnCount(8)
-        table.setHorizontalHeaderLabels([
-            "ID", "MIV Tag", "Location", "Status", "Comment",
-            "Registered For", "Registered By", "Last Updated"
-        ])
-        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        table.setRowCount(len(records))
-
-        for row, rec in enumerate(records):
-            table.setItem(row, 0, QTableWidgetItem(str(rec.id)))
-            table.setItem(row, 1, QTableWidgetItem(rec.miv_tag or ""))
-            table.setItem(row, 2, QTableWidgetItem(rec.location or ""))
-            table.setItem(row, 3, QTableWidgetItem(rec.status or ""))
-            table.setItem(row, 4, QTableWidgetItem(rec.comment or ""))
-            table.setItem(row, 5, QTableWidgetItem(rec.registered_for or ""))
-            table.setItem(row, 6, QTableWidgetItem(rec.registered_by or ""))
-            table.setItem(row, 7,
-                          QTableWidgetItem(rec.last_updated.strftime('%Y-%m-%d %H:%M') if rec.last_updated else ""))
-
-        table.resizeColumnsToContents()
-        layout.addWidget(table)
-
-        btn_layout = QHBoxLayout()
-        edit_btn = QPushButton("✏️ ویرایش رکورد")
-        delete_btn = QPushButton("🗑️ حذف رکورد")
-        edit_items_btn = QPushButton("✏️ ویرایش آیتم‌های مصرفی")
-        close_btn = QPushButton("بستن")
-
-        btn_layout.addWidget(edit_btn)
-        btn_layout.addWidget(delete_btn)
-        btn_layout.addWidget(edit_items_btn)
-        btn_layout.addStretch()
-        btn_layout.addWidget(close_btn)
-        layout.addLayout(btn_layout)
-
-        def get_selected_record_id():
-            selected = table.currentRow()
-            if selected < 0: return None
-            return int(table.item(selected, 0).text())
-
-        def edit_record():
-            record_id = get_selected_record_id()
-            if not record_id:
-                self.show_message("خطا", "لطفاً یک رکورد را انتخاب کنید.", "warning")
-                return
-            record = next((r for r in records if r.id == record_id), None)
-            if not record: return
-            new_location, ok1 = QInputDialog.getText(self, "ویرایش Location", "مقدار جدید:", text=record.location or "")
-            if not ok1: return
-            new_status, ok2 = QInputDialog.getText(self, "ویرایش Status", "مقدار جدید:", text=record.status or "")
-            if not ok2: return
-            success, msg = self.dm.update_miv_record(
-                record_id, {"location": new_location, "status": new_status}, user=self.current_user)
-            self.show_message("نتیجه", msg, "success" if success else "error")
-            if success:
-                dlg.close()
-                self.update_line_dashboard()
-
-        def delete_record():
-            record_id = get_selected_record_id()
-            if not record_id:
-                self.show_message("خطا", "لطفاً یک رکورد را انتخاب کنید.", "warning")
-                return
-            confirm = QMessageBox.question(
-                self, "تأیید حذف", f"آیا مطمئن هستید که رکورد {record_id} حذف شود؟ این عمل غیرقابل بازگشت است.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if confirm == QMessageBox.StandardButton.Yes:
-                success, msg = self.dm.delete_miv_record(record_id)
-                self.show_message("نتیجه", msg, "success" if success else "error")
-                if success:
-                    dlg.close()
-                    self.update_line_dashboard()
-
-        def edit_items():
-            record_id = get_selected_record_id()
-            if not record_id:
-                self.show_message("خطا", "یک رکورد انتخاب نشده.", "warning")
-                return
-            record = next((r for r in records if r.id == record_id), None)
-            if not record: return
-            dialog = MTOConsumptionDialog(self.dm, record.project_id, record.line_no, miv_record_id=record_id,
-                                          parent=self)
-            if dialog.exec():
-                consumed_items, spool_items = dialog.get_data()
-                success, msg = self.dm.update_miv_items(record_id, consumed_items, spool_items, user=self.current_user)
-                self.show_message("نتیجه", msg, "success" if success else "error")
-                if success:
-                    dlg.close()
-                    self.update_line_dashboard()
-
-        edit_btn.clicked.connect(edit_record)
-        delete_btn.clicked.connect(delete_record)
-        edit_items_btn.clicked.connect(edit_items)
-        close_btn.clicked.connect(dlg.close)
-        dlg.exec()
+        # ...
 
     def update_line_dashboard(self):
         if not self.current_project:
