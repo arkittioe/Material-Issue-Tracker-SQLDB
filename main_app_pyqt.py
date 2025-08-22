@@ -650,68 +650,78 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("مدیریت MIV - نسخه PyQt6")
+        self.setWindowTitle("مدیریت MIV - نسخه 1.0")
         self.setGeometry(100, 100, 1200, 800)
 
         self.dm = DataManager(db_path="miv_registry.db")
         self.current_project: Project | None = None
-        self.current_user = os.getlogin()  # گرفتن نام کاربری سیستم
-        self.suggestion_data = []  # 🔹 برای نگهداری داده‌های کامل پیشنهادها
+        self.current_user = os.getlogin()
+        self.suggestion_data = []
+        self.dashboard_password = "hossein"
 
+        # --- NEW: راه‌اندازی منوی بالای پنجره ---
+        self.setup_menu()
         self.setup_ui()
         self.connect_signals()
         self.populate_project_combo()
         QApplication.instance().aboutToQuit.connect(self.cleanup_processes)
-        self.dashboard_password = "hossein"  # 🔒 رمز موقت
+
+    def setup_menu(self):
+        """یک منوی Help در بالای پنجره اصلی ایجاد می‌کند."""
+        # ساخت منو بار
+        menu_bar = self.menuBar()
+        # اضافه کردن منوی Help (راهنما)
+        help_menu = menu_bar.addMenu("&Help")
+        # اضافه کردن گزینه About (درباره ما) به منوی Help
+        about_action = help_menu.addAction("&About")
+        # اتصال کلیک روی گزینه About به تابع نمایش دیالوگ
+        about_action.triggered.connect(self.show_about_dialog)
 
     def setup_ui(self):
         """متد اصلی برای ساخت و چیدمان تمام ویجت‌ها."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout(central_widget)
+        # --- CHANGE: چیدمان اصلی به QVBoxLayout تغییر کرد تا بتوانیم لیبل را در پایین اضافه کنیم ---
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(10, 10, 10, 5) # تنظیم فاصله از لبه‌ها
 
-        # --- اسپلیتر برای تقسیم صفحه ---
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # --- پنل سمت چپ (فرم و داشبورد) ---
         left_panel = QFrame()
         left_layout = QVBoxLayout(left_panel)
-
-        # فرم ثبت
         reg_form_frame = QFrame()
         reg_form_frame.setFrameShape(QFrame.Shape.StyledPanel)
         self.create_registration_form(reg_form_frame)
-
-        # داشبورد
         dashboard_frame = QFrame()
         dashboard_frame.setFrameShape(QFrame.Shape.StyledPanel)
         self.create_dashboard(dashboard_frame)
-
         left_layout.addWidget(reg_form_frame)
         left_layout.addWidget(dashboard_frame, 1)
 
-        # --- پنل سمت راست (جستجو و کنسول) ---
         right_panel = QFrame()
         right_layout = QVBoxLayout(right_panel)
-
-        # بخش جستجو
         search_frame = QFrame()
         search_frame.setFrameShape(QFrame.Shape.StyledPanel)
         self.create_search_box(search_frame)
-
-        # کنسول
         console_frame = QFrame()
         console_frame.setFrameShape(QFrame.Shape.StyledPanel)
         self.create_console(console_frame)
-
         right_layout.addWidget(search_frame)
         right_layout.addWidget(console_frame, 1)
 
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setSizes([500, 600])  # سایز اولیه پنل‌ها
+        splitter.setSizes([550, 650])
 
+        # اسپلیتر به چیدمان اصلی اضافه می‌شود
         main_layout.addWidget(splitter)
+
+        # --- NEW: اضافه کردن لیبل نام سازنده در پایین پنجره ---
+        dev_label = QLabel("Developed by Hossein Izadi (h.izadi)")
+        # استایل برای کم‌رنگ کردن و راست‌چین کردن متن
+        dev_label.setStyleSheet("color: #777; padding-top: 5px;")
+        dev_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        main_layout.addWidget(dev_label)
 
     def create_registration_form(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
@@ -1040,22 +1050,40 @@ class MainWindow(QMainWindow):
             print(f"⚠️ خطا در بستن پروسه‌ها: {e}")
 
     def open_spool_manager(self):
-        dlg = QInputDialog(self)
-        dlg.setWindowTitle("ورود رمز")
-        dlg.setLabelText("رمز را وارد کنید:")
-        dlg.setTextEchoMode(QLineEdit.EchoMode.Password)  # ⭐ نمایش به صورت ستاره
-        ok = dlg.exec()
-
-        password = dlg.textValue()
-
-        if not ok or password != self.dashboard_password:
-            self.show_message("خطا", "رمز اشتباه است یا عملیات لغو شد.", "error")
-            return
+        # dlg = QInputDialog(self)
+        # dlg.setWindowTitle("ورود رمز")
+        # dlg.setLabelText("رمز را وارد کنید:")
+        # dlg.setTextEchoMode(QLineEdit.EchoMode.Password)  # ⭐ نمایش به صورت ستاره
+        # ok = dlg.exec()
+        #
+        # password = dlg.textValue()
+        #
+        # if not ok or password != self.dashboard_password:
+        #     self.show_message("خطا", "رمز اشتباه است یا عملیات لغو شد.", "error")
+        #     return
 
         # ✅ اگر رمز درست بود ادامه بده
         python_executable = sys.executable
         dialog = SpoolManagerDialog(self.dm, self)
         dialog.exec()
+
+    def show_about_dialog(self):
+        """پنجره اطلاعات مربوط به برنامه و سازنده را نمایش می‌دهد."""
+        title = "About MIV Management"
+        # استفاده از Rich Text (HTML) برای فرمت‌بندی و ایجاد لینک‌های قابل کلیک
+        text = """
+        <h2>Material Issue Tracker</h2>
+        <p><b>Version:</b> 1.0.0</p>
+        <p>This application helps track and manage Material Take-Off (MTO),
+        Material Issue Vouchers (MIV), and Spool Inventory for engineering projects.</p>
+        <hr>
+        <p><b>Developer:</b> Hossein Izadi (h.izadi)</p>
+        <p><b>Email:</b> <a href="mailto:arkittoe@gmail.com">arkittoe@gmail.com</a></p>
+        <p><b>GitHub Repository:</b> <a href="https://github.com/arkittioe/Material-Issue-Tracker-SQLDB">Material-Issue-Tracker-SQLDB</a></p>
+        <br>
+        <p><i>Built with Python, PyQt6, and SQLAlchemy.</i></p>
+        """
+        QMessageBox.about(self, title, text)
 
 
 if __name__ == "__main__":
