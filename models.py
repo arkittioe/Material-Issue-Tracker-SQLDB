@@ -150,7 +150,7 @@ class SpoolItem(Base):
     spool_id_fk = Column(Integer, ForeignKey('spools.id'), nullable=False)
 
     component_type = Column(String)
-    class_angle = Column(String)
+    class_angle = Column(Float)
     p1_bore = Column(Float)
     p2_bore = Column(Float)
     material = Column(String)

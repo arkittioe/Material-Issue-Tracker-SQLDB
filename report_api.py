@@ -11,11 +11,12 @@ CORS(app)
 dm = DataManager(db_path="miv_registry.db")
 
 
+# --- Endpoints پایه ---
+
 @app.route("/api/projects")
 def get_projects():
     """لیست تمام پروژه‌ها را برای استفاده در فیلترها برمی‌گرداند."""
     projects = dm.get_all_projects()
-    # تبدیل لیست اشیاء به فرمت JSON مناسب
     projects_list = [{"id": p.id, "name": p.name} for p in projects]
     return jsonify(projects_list)
 
@@ -26,42 +27,74 @@ def get_lines():
     project_id = request.args.get("project_id", type=int)
     if not project_id:
         return jsonify({"error": "project_id is required"}), 400
-
     lines = dm.get_lines_for_project(project_id)
     return jsonify(lines)
 
 
-@app.route("/api/line-progress")
-def line_progress():
-    """گزارش پیشرفت مواد برای یک خط خاص را برمی‌گرداند (این متد قبلاً وجود داشت)."""
-    project_id = request.args.get("project_id", type=int)
-    line_no = request.args.get("line_no")
-    if not project_id or not line_no:
-        return jsonify({"error": "project_id and line_no are required"}), 400
+# --- Endpoints جدید برای گزارش‌گیری ---
 
-    data = dm.get_line_material_progress(project_id, line_no, readonly=True)
-    return jsonify(data)
-
-
-@app.route("/api/project-progress")
-def project_progress():
-    """گزارش کلی پیشرفت یک پروژه به تفکیک خطوط را برمی‌گرداند."""
+@app.route("/api/reports/mto-summary")
+def get_mto_summary_report():
+    """گزارش خلاصه پیشرفت متریال کل پروژه را برمی‌گرداند."""
     project_id = request.args.get("project_id", type=int)
     if not project_id:
         return jsonify({"error": "project_id is required"}), 400
+    data = dm.get_project_mto_summary(project_id)
+    return jsonify(data)
 
-    # از متد generate_project_report برای دریافت داده‌های کامل استفاده می‌کنیم
-    report = dm.generate_project_report(project_id)
-    return jsonify(report)
 
+@app.route("/api/reports/line-status")
+def get_line_status_report():
+    """گزارش وضعیت تمام خطوط یک پروژه را برمی‌گرداند."""
+    project_id = request.args.get("project_id", type=int)
+    if not project_id:
+        return jsonify({"error": "project_id is required"}), 400
+    data = dm.get_project_line_status_list(project_id)
+    return jsonify(data)
+
+
+@app.route("/api/reports/detailed-line")
+def get_detailed_line_report():
+    """گزارش کامل و جزئیات یک خط خاص را برمی‌گرداند."""
+    project_id = request.args.get("project_id", type=int)
+    line_no = request.args.get("line_no", type=str)
+    if not project_id or not line_no:
+        return jsonify({"error": "project_id and line_no are required"}), 400
+    data = dm.get_detailed_line_report(project_id, line_no)
+    return jsonify(data)
+
+
+@app.route("/api/reports/shortage")
+def get_shortage_report():
+    """گزارش کسری متریال یک پروژه (یا یک خط خاص از آن) را برمی‌گرداند."""
+    project_id = request.args.get("project_id", type=int)
+    line_no = request.args.get("line_no", default=None, type=str) # پارامتر جدید و اختیاری
+
+    if not project_id:
+        return jsonify({"error": "project_id is required"}), 400
+
+    # ارسال هر دو پارامتر به تابع دیتا منیجر
+    data = dm.get_shortage_report(project_id, line_no)
+    return jsonify(data)
+
+@app.route("/api/reports/spool-inventory")
+def get_spool_inventory_report():
+    """گزارش موجودی انبار اسپول را برمی‌گرداند (این گزارش سراسری است)."""
+    data = dm.get_spool_inventory_report()
+    return jsonify(data)
+
+
+@app.route("/api/reports/spool-consumption")
+def get_spool_consumption_history():
+    """گزارش تاریخچه مصرف اسپول‌ها را برمی‌گرداند (این گزارش سراسری است)."""
+    data = dm.get_spool_consumption_history()
+    return jsonify(data)
 
 @app.route("/api/activity-logs")
 def get_activity_logs():
     """آخرین لاگ‌های فعالیت ثبت شده در سیستم را برمی‌گرداند."""
     limit = request.args.get("limit", 100, type=int)
     logs = dm.get_activity_logs(limit)
-
-    # تبدیل اشیاء لاگ به فرمت JSON
     logs_list = [
         {
             "timestamp": log.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
@@ -72,16 +105,6 @@ def get_activity_logs():
     ]
     return jsonify(logs_list)
 
-
-@app.route("/api/project-analytics")
-def project_analytics():
-    """داده‌های تحلیلی یک پروژه را برمی‌گرداند."""
-    project_id = request.args.get("project_id", type=int)
-    if not project_id:
-        return jsonify({"error": "project_id is required"}), 400
-
-    analytics_data = dm.get_project_analytics(project_id)
-    return jsonify(analytics_data)
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

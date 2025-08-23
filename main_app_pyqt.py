@@ -5,7 +5,6 @@ import webbrowser
 import subprocess
 import os
 from functools import partial
-
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QComboBox, QPushButton, QTextEdit, QFrame, QMessageBox, QLineEdit,
@@ -437,6 +436,7 @@ class SpoolSelectionDialog(QDialog):
             spin_box.setMaximum(max(0, new_max))
             spin_box.blockSignals(False)
 
+
 class MTOConsumptionDialog(QDialog):
     def __init__(self, dm: DataManager, project_id: int, line_no: str, miv_record_id: int = None, parent=None):
         super().__init__(parent)
@@ -717,7 +717,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(splitter)
 
         # --- NEW: اضافه کردن لیبل نام سازنده در پایین پنجره ---
-        dev_label = QLabel("Developed by Hossein Izadi (h.izadi)")
+        dev_label = QLabel("Developed by Hossein Izadi")
         # استایل برای کم‌رنگ کردن و راست‌چین کردن متن
         dev_label.setStyleSheet("color: #777; padding-top: 5px;")
         dev_label.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -790,8 +790,14 @@ class MainWindow(QMainWindow):
         project_layout.addWidget(self.project_combo, 1)
         project_layout.addWidget(self.load_project_btn)
 
+        # --- NEW: دکمه‌های مدیریت و آپدیت داده ---
+        management_layout = QHBoxLayout()
         self.manage_spool_btn = QPushButton("مدیریت اسپول‌ها")
-        layout.addWidget(self.manage_spool_btn)
+        self.update_data_btn = QPushButton("🔄 به‌روزرسانی از CSV")  # دکمه جدید
+        self.update_data_btn.setStyleSheet("background-color: #6272a4;")  # رنگ متمایز
+
+        management_layout.addWidget(self.manage_spool_btn)
+        management_layout.addWidget(self.update_data_btn)
 
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
@@ -799,6 +805,7 @@ class MainWindow(QMainWindow):
         self.console_output.setStyleSheet("background-color: #2b2b2b; color: #f8f8f2;")
 
         layout.addLayout(project_layout)
+        layout.addLayout(management_layout)  # اضافه کردن چیدمان دکمه‌ها
         layout.addWidget(self.console_output, 1)
 
     def connect_signals(self):
@@ -815,6 +822,8 @@ class MainWindow(QMainWindow):
         self.entries["Line No"].textChanged.connect(self.update_line_dashboard)
 
         self.manage_spool_btn.clicked.connect(self.open_spool_manager)
+
+        self.update_data_btn.clicked.connect(self.handle_data_update_from_csv)
 
     def populate_project_combo(self):
         self.project_combo.clear()
@@ -960,6 +969,59 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dlg)
         # ...
 
+    def handle_data_update_from_csv(self):
+        """
+        --- CHANGE: بازنویسی کامل تابع برای انتخاب چند فایل و پردازش هوشمند ---
+        با انتخاب چند فایل CSV، آن‌ها را برای به‌روزرسانی پردازش می‌کند.
+        """
+        # ۱. گرفتن رمز برای عملیات حساس (بدون تغییر)
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle("ورود رمز")
+        dlg.setLabelText("این یک عملیات حساس است. لطفاً رمز را وارد کنید:")
+        dlg.setTextEchoMode(QLineEdit.EchoMode.Password)
+        if not dlg.exec() or dlg.textValue() != self.dashboard_password:
+            self.show_message("خطا", "رمز اشتباه است یا عملیات لغو شد.", "error")
+            return
+
+        # ۲. نمایش هشدار کلی (بدون تغییر)
+        confirm = QMessageBox.warning(self, "تایید عملیات بسیار مهم",
+                                      "<b>هشدار!</b>\n\n"
+                                      "شما در حال به‌روزرسانی داده‌ها از فایل‌های CSV هستید.\n"
+                                      "این عملیات داده‌های موجود در دیتابیس را بر اساس فایل‌های انتخابی <b>جایگزین</b> خواهد کرد.\n\n"
+                                      "<b>این عملیات غیرقابل بازگشت است. آیا مطمئن هستید؟</b>",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                                      QMessageBox.StandardButton.Cancel)
+        if confirm == QMessageBox.StandardButton.Cancel:
+            self.log_to_console("عملیات به‌روزرسانی داده لغو شد.", "warning")
+            return
+
+        # --- CHANGE: باز کردن دیالوگ انتخاب چند فایل به جای یک فولدر ---
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "فایل‌های CSV مورد نظر را انتخاب کنید (MTO-*.csv, Spools.csv, SpoolItems.csv)",
+            "",  # مسیر پیش‌فرض
+            "CSV Files (*.csv)"
+        )
+
+        if not file_paths:
+            self.log_to_console("هیچ فایلی انتخاب نشد. عملیات لغو شد.", "warning")
+            return
+
+        self.log_to_console(f"شروع فرآیند به‌روزرسانی برای {len(file_paths)} فایل انتخابی...", "info")
+        QApplication.processEvents()  # برای نمایش پیام قبل از شروع عملیات سنگین
+
+        # --- CHANGE: فراخوانی تابع جدید و هوشمند در DataManager ---
+        success, message = self.dm.process_selected_csv_files(file_paths)
+
+        # ۵. نمایش نتیجه نهایی (بدون تغییر)
+        if success:
+            self.log_to_console(message, "success")
+            self.show_message("موفق", message)
+            self.populate_project_combo()  # لیست پروژه‌ها را برای نمایش تغییرات احتمالی، بازخوانی می‌کنیم
+        else:
+            self.log_to_console(message, "error")
+            self.show_message("خطا", message, "error")
+
     def update_line_dashboard(self):
         if not self.current_project:
             return
@@ -1077,7 +1139,7 @@ class MainWindow(QMainWindow):
         <p>This application helps track and manage Material Take-Off (MTO),
         Material Issue Vouchers (MIV), and Spool Inventory for engineering projects.</p>
         <hr>
-        <p><b>Developer:</b> Hossein Izadi (h.izadi)</p>
+        <p><b>Developer:</b> Hossein Izadi</p>
         <p><b>Email:</b> <a href="mailto:arkittoe@gmail.com">arkittoe@gmail.com</a></p>
         <p><b>GitHub Repository:</b> <a href="https://github.com/arkittioe/Material-Issue-Tracker-SQLDB">Material-Issue-Tracker-SQLDB</a></p>
         <br>

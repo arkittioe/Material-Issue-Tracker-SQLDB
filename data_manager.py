@@ -1,7 +1,7 @@
 # file: data_manager.py
 
 import os
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine, func, desc
 from sqlalchemy.orm import sessionmaker, joinedload
 from functools import lru_cache
 from datetime import datetime
@@ -13,7 +13,7 @@ import difflib
 # data_manager.py (در ابتدای فایل)
 import logging
 import re
-from typing import Tuple
+from typing import Tuple, List, Dict, Any
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -1120,6 +1120,239 @@ class DataManager:
             session.close()
 
     # --------------------------------------------------------------------
+    # متدهای لازم برای گذارش گیری
+    # --------------------------------------------------------------------
+
+    def get_project_mto_summary(self, project_id: int) -> List[Dict[str, Any]]:
+        """
+        گزارش خلاصه پیشرفت متریال (MTO Summary) را برای کل پروژه تولید می‌کند.
+        """
+        session = self.get_session()
+        try:
+            # ابتدا اطمینان حاصل می‌شود که تمام خطوط، رکوردهای پیشرفت اولیه را دارند
+            all_lines = session.query(MTOItem.line_no).filter(MTOItem.project_id == project_id).distinct().all()
+            for line_no, in all_lines:
+                self.rebuild_mto_progress_for_line(project_id, line_no)
+
+            # اکنون داده‌های پیشرفت را در سطح پروژه جمع‌بندی می‌کنیم
+            summary_query = session.query(
+                MTOProgress.item_code,
+                MTOProgress.description,
+                MTOProgress.unit,
+                func.sum(MTOProgress.total_qty).label("total_required"),
+                func.sum(MTOProgress.used_qty).label("total_used")
+            ).filter(MTOProgress.project_id == project_id).group_by(
+                MTOProgress.item_code, MTOProgress.description, MTOProgress.unit
+            ).order_by(MTOProgress.item_code).all()
+
+            report_data = []
+            for row in summary_query:
+                remaining = row.total_required - row.total_used
+                progress = (row.total_used / row.total_required * 100) if row.total_required > 0 else 0
+                report_data.append({
+                    "Item Code": row.item_code or "N/A",
+                    "Description": row.description,
+                    "Unit": row.unit,
+                    "Total Required": round(row.total_required, 2),
+                    "Total Used": round(row.total_used, 2),
+                    "Remaining": round(remaining, 2),
+                    "Progress (%)": round(progress, 2)
+                })
+            return report_data
+        except Exception as e:
+            logging.error(f"Error in get_project_mto_summary: {e}")
+            return []
+        finally:
+            session.close()
+
+    def get_project_line_status_list(self, project_id: int) -> List[Dict[str, Any]]:
+        """
+        گزارش لیست وضعیت خطوط (Line Status List) را برای یک پروژه تولید می‌کند.
+        """
+        session = self.get_session()
+        try:
+            lines = self.get_lines_for_project(project_id)
+            report_data = []
+            for line_no in lines:
+                progress_info = self.get_line_progress(project_id, line_no)
+                last_activity = session.query(func.max(MIVRecord.last_updated)).filter(
+                    MIVRecord.project_id == project_id,
+                    MIVRecord.line_no == line_no
+                ).scalar()
+
+                status = "Complete" if progress_info.get("percentage", 0) >= 99.99 else "In-Progress"
+
+                report_data.append({
+                    "Line No": line_no,
+                    "Progress (%)": progress_info.get("percentage", 0),
+                    "Status": status,
+                    "Last Activity Date": last_activity.strftime('%Y-%m-%d') if last_activity else "N/A"
+                })
+            return sorted(report_data, key=lambda x: x['Line No'])
+        except Exception as e:
+            logging.error(f"Error in get_project_line_status_list: {e}")
+            return []
+        finally:
+            session.close()
+
+    def get_detailed_line_report(self, project_id: int, line_no: str) -> Dict[str, List]:
+        """
+        گزارش کامل و دو بخشی یک خط خاص را تولید می‌کند.
+        """
+        session = self.get_session()
+        try:
+            # بخش اول: لیست متریال (Bill of Materials)
+            bom = self.get_enriched_line_progress(project_id, line_no,
+                                                  readonly=False)  # Readonly=False to ensure it's initialized
+
+            # بخش دوم: تاریخچه MIV ها
+            miv_history_query = session.query(MIVRecord).filter(
+                MIVRecord.project_id == project_id,
+                MIVRecord.line_no == line_no
+            ).order_by(desc(MIVRecord.last_updated)).all()
+
+            miv_history = [
+                {
+                    "MIV Tag": r.miv_tag,
+                    "Registered By": r.registered_by,
+                    "Date": r.last_updated.strftime('%Y-%m-%d %H:%M'),
+                    "Status": r.status,
+                    "Comment": r.comment
+                } for r in miv_history_query
+            ]
+
+            return {
+                "bill_of_materials": bom,
+                "miv_history": miv_history
+            }
+        except Exception as e:
+            logging.error(f"Error in get_detailed_line_report: {e}")
+            return {"bill_of_materials": [], "miv_history": []}
+        finally:
+            session.close()
+
+    def get_shortage_report(self, project_id: int, line_no: str = None) -> List[Dict[str, Any]]:
+        """
+        گزارش کسری متریال را برای کل پروژه یا یک خط خاص تولید می‌کند.
+        فقط آیتم‌هایی نمایش داده می‌شوند که مقدار باقی‌مانده (Remaining) بیشتر از صفر باشد.
+        """
+        session = self.get_session()
+        try:
+            query = session.query(
+                MTOProgress.item_code,
+                MTOProgress.description,
+                MTOProgress.unit,
+                func.sum(MTOProgress.total_qty).label("total_required"),
+                func.sum(MTOProgress.used_qty).label("total_used")
+            ).filter(MTOProgress.project_id == project_id)
+
+            # اگر شماره خط مشخص شده بود، کوئری را به آن خط محدود کن
+            if line_no:
+                query = query.filter(MTOProgress.line_no == line_no)
+
+            # فیلتر کردن آیتم‌هایی که کسری دارند
+            results = query.group_by(
+                MTOProgress.item_code, MTOProgress.description, MTOProgress.unit
+            ).having(
+                func.sum(MTOProgress.total_qty) > func.sum(MTOProgress.used_qty)
+            ).order_by(MTOProgress.item_code).all()
+
+            report_data = []
+            for row in results:
+                remaining = row.total_required - row.total_used
+                progress = (row.total_used / row.total_required * 100) if row.total_required > 0 else 0
+                report_data.append({
+                    "Item Code": row.item_code or "N/A",
+                    "Description": row.description,
+                    "Unit": row.unit,
+                    "Total Required": round(row.total_required, 2),
+                    "Total Used": round(row.total_used, 2),
+                    "Remaining": round(remaining, 2),
+                    "Progress (%)": round(progress, 2)
+                })
+            return report_data
+        except Exception as e:
+            logging.error(f"Error in get_shortage_report: {e}")
+            return []
+        finally:
+            session.close()
+
+    def get_spool_inventory_report(self) -> List[Dict[str, Any]]:
+        """
+        گزارش موجودی انبار اسپول را تولید می‌کند.
+        """
+        session = self.get_session()
+        try:
+            inventory_query = session.query(Spool, SpoolItem).join(
+                SpoolItem, Spool.id == SpoolItem.spool_id_fk
+            ).filter(
+                (SpoolItem.qty_available > 0.001) | (SpoolItem.length > 0.001)
+            ).order_by(Spool.spool_id, SpoolItem.component_type).all()
+
+            report_data = []
+            for spool, item in inventory_query:
+                is_pipe = "PIPE" in (item.component_type or "").upper()
+                available = item.length if is_pipe else item.qty_available
+                unit = "m" if is_pipe else "pcs"
+
+                report_data.append({
+                    "Spool ID": spool.spool_id,
+                    "Location": spool.location,
+                    "Component Type": item.component_type,
+                    "Item Code": item.item_code,
+                    "Material": item.material,
+                    "Bore1": item.p1_bore,
+                    "Schedule": item.schedule,
+                    "Available": f"{available:.2f} {unit}"
+                })
+            return report_data
+        except Exception as e:
+            logging.error(f"Error in get_spool_inventory_report: {e}")
+            return []
+        finally:
+            session.close()
+
+    def get_spool_consumption_history(self) -> List[Dict[str, Any]]:
+        """
+        گزارش تاریخچه مصرف اسپول‌ها را تولید می‌کند.
+        """
+        session = self.get_session()
+        try:
+            history_query = session.query(
+                SpoolConsumption.timestamp,
+                Spool.spool_id,
+                SpoolItem.component_type,
+                SpoolConsumption.used_qty,
+                MIVRecord.miv_tag,
+                MIVRecord.line_no
+            ).join(
+                SpoolItem, SpoolConsumption.spool_item_id == SpoolItem.id
+            ).join(
+                Spool, SpoolConsumption.spool_id == Spool.id
+            ).join(
+                MIVRecord, SpoolConsumption.miv_record_id == MIVRecord.id
+            ).order_by(desc(SpoolConsumption.timestamp)).all()
+
+            report_data = []
+            for row in history_query:
+                is_pipe = "PIPE" in (row.component_type or "").upper()
+                unit = "m" if is_pipe else "pcs"
+                report_data.append({
+                    "Timestamp": row.timestamp.strftime('%Y-%m-%d %H:%M'),
+                    "Spool ID": row.spool_id,
+                    "Component Type": row.component_type,
+                    "Used Qty": f"{row.used_qty:.2f} {unit}",
+                    "Consumed in MIV": row.miv_tag,
+                    "For Line No": row.line_no
+                })
+            return report_data
+        except Exception as e:
+            logging.error(f"Error in get_spool_consumption_history: {e}")
+            return []
+        finally:
+            session.close()
+
+    # --------------------------------------------------------------------
     # متدهای لازم برای اسپول MIV SPOOL
     # --------------------------------------------------------------------
 
@@ -1270,6 +1503,7 @@ class DataManager:
     # --------------------------------------------------------------------
     # متدهای لازم برای  مدیریت اسپول ها
     # --------------------------------------------------------------------
+
     def create_spool(self, spool_data: dict, items_data: list[dict]) -> Tuple[bool, str]:
         """
         یک اسپول جدید همراه با آیتم‌هایش ایجاد می‌کند.
@@ -1443,3 +1677,260 @@ class DataManager:
         finally:
             session.close()
 
+    # --------------------------------------------------------------------
+    # متدهای لازم برای اپدیت CSV
+    # --------------------------------------------------------------------
+
+    def get_or_create_project(self, session, project_name: str) -> Project:
+        """یک پروژه را با نام آن پیدا کرده یا در صورت عدم وجود، آن را ایجاد می‌کند."""
+        project = session.query(Project).filter(Project.name == project_name).first()
+        if not project:
+            self.log_activity("system", "CREATE_PROJECT",
+                              f"پروژه '{project_name}' به صورت خودکار حین آپدیت داده ساخته شد.", session)
+            project = Project(name=project_name)
+            session.add(project)
+            session.flush()  # برای گرفتن شناسه پروژه جدید
+        return project
+
+    def update_project_mto_from_csv(self, project_name: str, mto_file_path: str) -> Tuple[bool, str]:
+        """
+        --- CHANGE: استفاده از تابع نرمال‌سازی جدید برای انعطاف‌پذیری بیشتر ---
+        """
+        # --- CHANGE: تعریف نگاشت بر اساس نام‌های نرمال‌شده و ستون‌های ضروری دیتابیس ---
+        REQUIRED_DB_COLS = {'line_no', 'description'}
+        MTO_COLUMN_MAP = {
+            'UNIT': 'unit', 'LINENO': 'line_no', 'CLASS': 'item_class', 'TYPE': 'item_type',
+            'DESCRIPTION': 'description', 'ITEMCODE': 'item_code', 'MAT': 'material_code',
+            'P1BOREIN': 'p1_bore_in', 'P2BOREIN': 'p2_bore_in', 'P3BOREIN': 'p3_bore_in',
+            'LENGTHM': 'length_m', 'QUANTITY': 'quantity', 'JOINT': 'joint', 'INCHDIA': 'inch_dia'
+        }
+
+        session = self.get_session()
+        try:
+            with session.begin():
+                self.log_activity("system", "MTO_UPDATE_START", f"شروع آپدیت MTO برای پروژه '{project_name}'.", session)
+
+                project = self.get_or_create_project(session, project_name)
+                project_id = project.id
+
+                # خواندن و پردازش DataFrame با تابع جدید
+                mto_df_raw = pd.read_csv(mto_file_path, dtype=str).fillna('')
+                mto_df = self._normalize_and_rename_df(
+                    mto_df_raw, MTO_COLUMN_MAP, REQUIRED_DB_COLS, os.path.basename(mto_file_path)
+                )
+                mto_df['project_id'] = project_id
+
+                # تبدیل ستون‌های عددی
+                for col in ['p1_bore_in', 'p2_bore_in', 'p3_bore_in', 'length_m', 'quantity', 'joint', 'inch_dia']:
+                     if col in mto_df.columns:
+                        mto_df[col] = pd.to_numeric(mto_df[col], errors='coerce')
+
+
+                # حذف داده‌های قدیمی (بدون تغییر)
+                mto_item_ids_to_delete = session.query(MTOItem.id).filter(MTOItem.project_id == project_id).scalar_subquery()
+                session.query(MTOConsumption).filter(MTOConsumption.mto_item_id.in_(mto_item_ids_to_delete)).delete(synchronize_session=False)
+                session.query(MTOProgress).filter(MTOProgress.project_id == project_id).delete(synchronize_session=False)
+                session.query(MTOItem).filter(MTOItem.project_id == project_id).delete(synchronize_session=False)
+                session.flush()
+
+                # درج داده‌های جدید
+                mto_records = mto_df.to_dict(orient='records')
+                if mto_records:
+                    session.bulk_insert_mappings(MTOItem, mto_records)
+
+            self.log_activity("system", "MTO_UPDATE_SUCCESS", f"{len(mto_df)} آیتم MTO برای '{project_name}' آپدیت شد.")
+            return True, f"✔ داده‌های MTO برای پروژه '{project_name}' با موفقیت به‌روزرسانی شدند."
+
+        except (ValueError, KeyError, FileNotFoundError) as e:
+            session.rollback()
+            logging.error(f"شکست در آپدیت MTO برای {project_name}: {e}")
+            return False, f"خطا در فایل MTO پروژه '{project_name}': {e}"
+        except Exception as e:
+            session.rollback()
+            logging.error(f"An unexpected error occurred during MTO update for {project_name}: {e}")
+            return False, f"خطای غیرمنتظره در آپدیت MTO پروژه '{project_name}': {e}"
+        finally:
+            session.close()
+
+    def process_selected_csv_files(self, file_paths: List[str]) -> Tuple[bool, str]:
+        """
+        --- NEW: تابع جدید برای پردازش هوشمند فایل‌های CSV انتخاب شده ---
+        فایل‌ها را دسته‌بندی کرده و عملیات آپدیت مربوطه (MTO یا Spool) را اجرا می‌کند.
+        """
+        try:
+            # دسته‌بندی فایل‌های انتخاب شده
+            mto_files = {}
+            spool_file = None
+            spool_items_file = None
+
+            for path in file_paths:
+                filename = os.path.basename(path)
+                if filename.upper().startswith("MTO-") and filename.upper().endswith(".CSV"):
+                    project_name = filename.replace("MTO-", "").replace(".csv", "")
+                    mto_files[project_name] = path
+                elif filename.upper() == "SPOOLS.CSV":
+                    spool_file = path
+                elif filename.upper() == "SPOOLITEMS.CSV":
+                    spool_items_file = path
+
+            # بررسی شرایط لازم برای هر نوع آپدیت
+            can_update_spool = spool_file and spool_items_file
+            can_update_mto = bool(mto_files)
+
+            if not can_update_spool and not can_update_mto:
+                return False, "هیچ فایل معتبری انتخاب نشد.\nبرای آپدیت MTO، نام فایل باید `MTO-ProjectName.csv` باشد.\nبرای آپدیت Spool، هر دو فایل `Spools.csv` و `SpoolItems.csv` باید انتخاب شوند."
+
+            summary_log = []
+
+            # ۱. آپدیت داده‌های Spool (اگر هر دو فایل انتخاب شده باشند)
+            # این عملیات اول انجام می‌شود چون ممکن است MTO به آن وابسته باشد.
+            if can_update_spool:
+                logging.info("Processing Spool files...")
+                success, message = self.replace_all_spool_data(spool_file, spool_items_file)
+                if not success:
+                    # اگر آپدیت اسپول شکست بخورد، کل عملیات متوقف می‌شود
+                    return False, f"خطا در به‌روزرسانی Spool: {message}"
+                summary_log.append(message)
+
+            # ۲. آپدیت داده‌های MTO (برای هر فایل MTO به صورت مجزا)
+            if can_update_mto:
+                for project_name, mto_path in sorted(mto_files.items()):
+                    logging.info(f"Processing MTO file for project '{project_name}'...")
+                    success, message = self.update_project_mto_from_csv(project_name, mto_path)
+                    if not success:
+                        # اگر آپدیت یک پروژه شکست بخورد، کل عملیات متوقف می‌شود
+                        error_msg = f"خطا در آپدیت پروژه '{project_name}': {message}. عملیات متوقف شد."
+                        return False, error_msg
+                    summary_log.append(message)
+
+            return True, "\n".join(summary_log)
+
+        except Exception as e:
+            import traceback
+            logging.error(f"An unexpected error occurred in process_selected_csv_files: {traceback.format_exc()}")
+            return False, f"یک خطای پیش‌بینی نشده در پردازش فایل‌ها رخ داد: {e}"
+
+    def replace_all_spool_data(self, spool_file_path: str, spool_items_file_path: str) -> Tuple[bool, str]:
+        """
+        --- CHANGE: استفاده از تابع نرمال‌سازی جدید برای انعطاف‌پذیری بیشتر ---
+        """
+        # --- CHANGE: تعریف نگاشت بر اساس نام‌های نرمال‌شده و ستون‌های ضروری دیتابیس ---
+        REQUIRED_SPOOL_DB_COLS = {"spool_id"}
+        REQUIRED_SPOOL_ITEM_DB_COLS = {"spool_id_str", "component_type"}
+
+        SPOOL_COLUMN_MAP = {
+            "SPOOLID": "spool_id", "ROWNO": "row_no", "LOCATION": "location", "COMMAND": "command"
+        }
+        SPOOL_ITEM_COLUMN_MAP = {
+            "SPOOLID": "spool_id_str", "COMPONENTTYPE": "component_type", "CLASSANGLE": "class_angle",
+            "P1BORE": "p1_bore", "P2BORE": "p2_bore", "MATERIAL": "material", "SCHEDULE": "schedule",
+            "THICKNESS": "thickness", "LENGTH": "length", "QTYAVAILABLE": "qty_available", "ITEMCODE": "item_code"
+        }
+        session = self.get_session()
+        try:
+            with session.begin():
+                # پردازش فایل Spools.csv
+                spools_df_raw = pd.read_csv(spool_file_path, dtype=str).fillna('')
+                spools_df = self._normalize_and_rename_df(
+                    spools_df_raw, SPOOL_COLUMN_MAP, REQUIRED_SPOOL_DB_COLS, os.path.basename(spool_file_path)
+                )
+                spools_df['spool_id'] = spools_df['spool_id'].str.strip().str.upper()
+
+                # پردازش فایل SpoolItems.csv
+                spool_items_df_raw = pd.read_csv(spool_items_file_path, dtype=str).fillna('')
+                spool_items_df = self._normalize_and_rename_df(
+                    spool_items_df_raw, SPOOL_ITEM_COLUMN_MAP, REQUIRED_SPOOL_ITEM_DB_COLS, os.path.basename(spool_items_file_path)
+                )
+                spool_items_df['spool_id_str'] = spool_items_df['spool_id_str'].str.strip().str.upper()
+
+                # حذف داده‌های قدیمی (بدون تغییر)
+                session.query(SpoolConsumption).delete(synchronize_session=False)
+                session.query(SpoolItem).delete(synchronize_session=False)
+                session.query(Spool).delete(synchronize_session=False)
+                session.flush()
+
+                # درج داده‌های جدید Spools و ساخت نگاشت (بدون تغییر)
+                spool_records = spools_df.to_dict(orient="records")
+                if spool_records:
+                    session.bulk_insert_mappings(Spool, spool_records)
+                session.flush()
+
+                spool_id_map = {spool.spool_id: spool.id for spool in session.query(Spool.id, Spool.spool_id).all()}
+
+                # درج داده‌های جدید SpoolItems (بدون تغییر)
+                spool_items_df["spool_id_fk"] = spool_items_df["spool_id_str"].map(spool_id_map)
+                spool_items_df.dropna(subset=["spool_id_fk"], inplace=True)
+                spool_items_df["spool_id_fk"] = spool_items_df["spool_id_fk"].astype(int)
+
+                # تبدیل ستون‌های عددی
+                for col in ["class_angle", "p1_bore", "p2_bore", "thickness", "length", "qty_available"]:
+                     if col in spool_items_df.columns:
+                        spool_items_df[col] = pd.to_numeric(spool_items_df[col], errors='coerce')
+
+                item_records = spool_items_df.drop(columns=["spool_id_str"]).to_dict(orient="records")
+                if item_records:
+                    session.bulk_insert_mappings(SpoolItem, item_records)
+
+            self.log_activity("system", "SPOOL_UPDATE_SUCCESS", f"{len(spools_df)} اسپول و {len(spool_items_df)} آیتم اسپول جایگزین شدند.")
+            return True, "✔ داده‌های Spool با موفقیت به صورت کامل جایگزین شدند."
+
+        except (ValueError, KeyError, FileNotFoundError) as e:
+            return False, f"خطا در فایل‌های Spool: {e}"
+        except Exception as e:
+            return False, f"خطای دیتابیس در جایگزینی Spool: {e}. (ممکن است رکوردهای مصرفی مانع حذف شده باشند)"
+        finally:
+            session.close()
+
+    def _validate_and_normalize_df(self, df: pd.DataFrame, required_columns: set, file_name: str) -> pd.DataFrame:
+        """
+        ستون‌های DataFrame را به حروف بزرگ تبدیل کرده و وجود ستون‌های ضروری را بررسی می‌کند.
+        """
+        # ۱. تمام ستون‌ها را به حروف بزرگ تبدیل کرده و فضاهای خالی احتمالی را حذف می‌کنیم
+        original_columns = df.columns
+        df.columns = [str(col).strip().upper() for col in original_columns]
+
+        # ۲. بررسی می‌کنیم که آیا تمام ستون‌های ضروری وجود دارند یا خیر
+        present_columns = set(df.columns)
+        missing_columns = required_columns - present_columns
+
+        # ۳. اگر ستونی وجود نداشت، یک پیام خطای دقیق نمایش می‌دهیم
+        if missing_columns:
+            missing_str = ", ".join(sorted(list(missing_columns)))
+            raise ValueError(f"فایل '{file_name}' ستون‌های ضروری زیر را ندارد: {missing_str}")
+
+        return df
+
+    def _normalize_and_rename_df(self, df: pd.DataFrame, column_map: dict, required_db_cols: set,
+                                 file_name: str) -> pd.DataFrame:
+        """
+        --- CHANGE: اضافه کردن .copy() در انتها برای جلوگیری از هشدار ---
+        1. نام ستون‌های فایل CSV را نرمال‌سازی می‌کند (حذف علائم، تبدیل به حروف بزرگ).
+        2. آن‌ها را با دیکشنری column_map به نام‌های ستون دیتابیس تبدیل می‌کند.
+        3. وجود ستون‌های ضروری را پس از تغییر نام، بررسی می‌کند.
+        """
+
+        def normalize_header(name: str) -> str:
+            """یک نام ستون را گرفته و آن را پاکسازی می‌کند."""
+            return re.sub(r'[^A-Z0-9]', '', str(name).upper())
+
+        rename_map = {}
+        found_db_cols = set()
+
+        for original_col in df.columns:
+            normalized_col = normalize_header(original_col)
+            if normalized_col in column_map:
+                db_col = column_map[normalized_col]
+                rename_map[original_col] = db_col
+                found_db_cols.add(db_col)
+
+        missing_cols = required_db_cols - found_db_cols
+        if missing_cols:
+            missing_str = ", ".join(sorted(list(missing_cols)))
+            raise ValueError(f"فایل '{file_name}' ستون‌های ضروری زیر را ندارد: {missing_str}")
+
+        df.rename(columns=rename_map, inplace=True)
+
+        final_cols = [col for col in df.columns if col in found_db_cols]
+
+        # --- CHANGE: با افزودن .copy()، یک DataFrame جدید و مستقل ساخته می‌شود ---
+        return df[final_cols].copy()
