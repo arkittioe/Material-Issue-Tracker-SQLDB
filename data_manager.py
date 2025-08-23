@@ -1123,18 +1123,14 @@ class DataManager:
     # متدهای لازم برای گذارش گیری
     # --------------------------------------------------------------------
 
-    def get_project_mto_summary(self, project_id: int) -> List[Dict[str, Any]]:
+    def get_project_mto_summary(self, project_id: int, **filters) -> Dict[str, Any]:
         """
+        --- CHANGE: بازنویسی کامل برای افزودن فیلترهای پیشرفته و خلاصه‌سازی ---
         گزارش خلاصه پیشرفت متریال (MTO Summary) را برای کل پروژه تولید می‌کند.
         """
         session = self.get_session()
         try:
-            # ابتدا اطمینان حاصل می‌شود که تمام خطوط، رکوردهای پیشرفت اولیه را دارند
-            all_lines = session.query(MTOItem.line_no).filter(MTOItem.project_id == project_id).distinct().all()
-            for line_no, in all_lines:
-                self.rebuild_mto_progress_for_line(project_id, line_no)
-
-            # اکنون داده‌های پیشرفت را در سطح پروژه جمع‌بندی می‌کنیم
+            # کوئری پایه برای جمع‌بندی پیشرفت در سطح پروژه
             summary_query = session.query(
                 MTOProgress.item_code,
                 MTOProgress.description,
@@ -1143,12 +1139,34 @@ class DataManager:
                 func.sum(MTOProgress.used_qty).label("total_used")
             ).filter(MTOProgress.project_id == project_id).group_by(
                 MTOProgress.item_code, MTOProgress.description, MTOProgress.unit
-            ).order_by(MTOProgress.item_code).all()
+            )
+
+            # --- Filters ---
+            if filters.get('item_code'):
+                summary_query = summary_query.filter(MTOProgress.item_code.ilike(f"%{filters['item_code']}%"))
+            if filters.get('description'):
+                summary_query = summary_query.filter(MTOProgress.description.ilike(f"%{filters['description']}%"))
+
+            # اجرای کوئری برای گرفتن تمام نتایج فیلتر شده
+            all_results = summary_query.all()
 
             report_data = []
-            for row in summary_query:
+            total_required_sum = 0
+            total_used_sum = 0
+
+            for row in all_results:
+                total_required_sum += row.total_required
+                total_used_sum += row.total_used
                 remaining = row.total_required - row.total_used
                 progress = (row.total_used / row.total_required * 100) if row.total_required > 0 else 0
+
+                # فیلترهای بعد از محاسبه (برای پیشرفت)
+                min_progress = filters.get('min_progress')
+                max_progress = filters.get('max_progress')
+                if (min_progress is not None and progress < min_progress) or \
+                        (max_progress is not None and progress > max_progress):
+                    continue
+
                 report_data.append({
                     "Item Code": row.item_code or "N/A",
                     "Description": row.description,
@@ -1158,10 +1176,30 @@ class DataManager:
                     "Remaining": round(remaining, 2),
                     "Progress (%)": round(progress, 2)
                 })
-            return report_data
+
+            # مرتب‌سازی نهایی
+            sort_by = filters.get('sort_by', 'Item Code')
+            sort_order = filters.get('sort_order', 'asc')
+            reverse = sort_order == 'desc'
+            if sort_by in report_data[0]:
+                report_data.sort(key=lambda x: x[sort_by], reverse=reverse)
+
+            # ساخت دیکشنری خروجی نهایی
+            output = {
+                "summary": {
+                    "total_unique_items": len(report_data),
+                    "grand_total_required": round(total_required_sum, 2),
+                    "grand_total_used": round(total_used_sum, 2),
+                    "overall_progress": round(
+                        (total_used_sum / total_required_sum * 100) if total_required_sum > 0 else 0, 2)
+                },
+                "data": report_data
+            }
+            return output
+
         except Exception as e:
             logging.error(f"Error in get_project_mto_summary: {e}")
-            return []
+            return {"summary": {}, "data": []}
         finally:
             session.close()
 
@@ -1277,24 +1315,46 @@ class DataManager:
         finally:
             session.close()
 
-    def get_spool_inventory_report(self) -> List[Dict[str, Any]]:
+    def get_spool_inventory_report(self, **filters) -> Dict[str, Any]:
         """
+        --- CHANGE: بازنویسی کامل برای افزودن فیلتر، مرتب‌سازی و صفحه‌بندی ---
         گزارش موجودی انبار اسپول را تولید می‌کند.
         """
         session = self.get_session()
         try:
-            inventory_query = session.query(Spool, SpoolItem).join(
+            query = session.query(Spool, SpoolItem).join(
                 SpoolItem, Spool.id == SpoolItem.spool_id_fk
             ).filter(
                 (SpoolItem.qty_available > 0.001) | (SpoolItem.length > 0.001)
-            ).order_by(Spool.spool_id, SpoolItem.component_type).all()
+            )
+
+            # --- Filters ---
+            if filters.get('spool_id'):
+                query = query.filter(Spool.spool_id.ilike(f"%{filters['spool_id']}%"))
+            if filters.get('location'):
+                query = query.filter(Spool.location.ilike(f"%{filters['location']}%"))
+            if filters.get('component_type'):
+                query = query.filter(SpoolItem.component_type.ilike(f"%{filters['component_type']}%"))
+            if filters.get('material'):
+                query = query.filter(SpoolItem.material.ilike(f"%{filters['material']}%"))
+
+            # --- Sorting ---
+            sort_by = filters.get('sort_by', 'spool_id')
+            sort_order = filters.get('sort_order', 'asc')
+            sort_column = getattr(Spool, sort_by, getattr(SpoolItem, sort_by, Spool.spool_id))
+            query = query.order_by(desc(sort_column) if sort_order == 'desc' else sort_column)
+
+            # --- Pagination ---
+            page = filters.get('page', 1)
+            per_page = filters.get('per_page', 20)
+            total_records = query.count()
+            total_pages = (total_records + per_page - 1) // per_page
+
+            results = query.offset((page - 1) * per_page).limit(per_page).all()
 
             report_data = []
-            for spool, item in inventory_query:
+            for spool, item in results:
                 is_pipe = "PIPE" in (item.component_type or "").upper()
-                available = item.length if is_pipe else item.qty_available
-                unit = "m" if is_pipe else "pcs"
-
                 report_data.append({
                     "Spool ID": spool.spool_id,
                     "Location": spool.location,
@@ -1303,12 +1363,22 @@ class DataManager:
                     "Material": item.material,
                     "Bore1": item.p1_bore,
                     "Schedule": item.schedule,
-                    "Available": f"{available:.2f} {unit}"
+                    "Available": round(item.length if is_pipe else item.qty_available, 2),
+                    "Unit": "m" if is_pipe else "pcs"
                 })
-            return report_data
+
+            return {
+                "pagination": {
+                    "total_records": total_records,
+                    "total_pages": total_pages,
+                    "current_page": page,
+                    "per_page": per_page
+                },
+                "data": report_data
+            }
         except Exception as e:
             logging.error(f"Error in get_spool_inventory_report: {e}")
-            return []
+            return {"pagination": {}, "data": []}
         finally:
             session.close()
 
@@ -1349,6 +1419,83 @@ class DataManager:
         except Exception as e:
             logging.error(f"Error in get_spool_consumption_history: {e}")
             return []
+        finally:
+            session.close()
+
+    def get_report_analytics(self, project_id: int, report_name: str, **params) -> Dict[str, Any]:
+        """
+        --- NEW: متد جدید و قدرتمند برای تولید داده‌های تحلیلی و آماری برای نمودارها ---
+        """
+        session = self.get_session()
+        try:
+            # گزارش اول: توزیع پیشرفت خطوط (برای نمودار میله‌ای یا دایره‌ای)
+            if report_name == 'line_progress_distribution':
+                lines = self.get_project_line_status_list(project_id)
+                bins = {"0-25%": 0, "25-50%": 0, "50-75%": 0, "75-99%": 0, "100%": 0}
+                for line in lines:
+                    p = line['Progress (%)']
+                    if p < 25:
+                        bins["0-25%"] += 1
+                    elif p < 50:
+                        bins["25-50%"] += 1
+                    elif p < 75:
+                        bins["50-75%"] += 1
+                    elif p < 100:
+                        bins["75-99%"] += 1
+                    else:
+                        bins["100%"] += 1
+
+                return {
+                    "title": "توزیع پیشرفت خطوط",
+                    "type": "bar",
+                    "data": {
+                        "labels": list(bins.keys()),
+                        "datasets": [{"label": "تعداد خطوط", "data": list(bins.values())}]
+                    }
+                }
+
+            # گزارش دوم: مصرف متریال بر اساس نوع (برای نمودار دایره‌ای)
+            elif report_name == 'material_usage_by_type':
+                query = session.query(
+                    MTOItem.item_type,
+                    func.sum(MTOProgress.used_qty).label('total_used')
+                ).join(MTOProgress, MTOItem.id == MTOProgress.mto_item_id) \
+                    .filter(MTOProgress.project_id == project_id, MTOItem.item_type != None) \
+                    .group_by(MTOItem.item_type).order_by(desc('total_used')).limit(10)
+
+                results = query.all()
+                return {
+                    "title": "۱۰ نوع متریال پر مصرف",
+                    "type": "pie",
+                    "data": {
+                        "labels": [r.item_type for r in results],
+                        "datasets": [{"data": [round(r.total_used, 2) for r in results]}]
+                    }
+                }
+
+            # گزارش سوم: تاریخچه مصرف در طول زمان (برای نمودار خطی)
+            elif report_name == 'consumption_over_time':
+                # این گزارش سراسری است و به پروژه وابسته نیست
+                query = session.query(
+                    func.strftime('%Y-%m-%d', SpoolConsumption.timestamp).label('date'),
+                    func.count(SpoolConsumption.id).label('consumption_count')
+                ).group_by('date').order_by('date')
+
+                results = query.all()
+                return {
+                    "title": "تعداد آیتم‌های مصرفی از انبار اسپول در طول زمان",
+                    "type": "line",
+                    "data": {
+                        "labels": [r.date for r in results],
+                        "datasets": [{"label": "تعداد مصرف", "data": [r.consumption_count for r in results]}]
+                    }
+                }
+
+            return {"error": "Report name not found"}, 404
+
+        except Exception as e:
+            logging.error(f"Error in get_report_analytics: {e}")
+            return {"error": str(e)}, 500
         finally:
             session.close()
 

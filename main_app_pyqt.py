@@ -717,9 +717,9 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(splitter)
 
         # --- NEW: اضافه کردن لیبل نام سازنده در پایین پنجره ---
-        dev_label = QLabel("Developed by Hossein Izadi")
+        dev_label = QLabel("Developed by h.izadi")
         # استایل برای کم‌رنگ کردن و راست‌چین کردن متن
-        dev_label.setStyleSheet("color: #777; padding-top: 5px;")
+        dev_label.setStyleSheet("color: #777; padding-top: 4px;")
         dev_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         main_layout.addWidget(dev_label)
 

@@ -35,13 +35,24 @@ def get_lines():
 
 @app.route("/api/reports/mto-summary")
 def get_mto_summary_report():
-    """گزارش خلاصه پیشرفت متریال کل پروژه را برمی‌گرداند."""
     project_id = request.args.get("project_id", type=int)
     if not project_id:
         return jsonify({"error": "project_id is required"}), 400
-    data = dm.get_project_mto_summary(project_id)
-    return jsonify(data)
 
+    # جمع‌آوری فیلترها از query string
+    filters = {
+        'item_code': request.args.get('item_code', type=str),
+        'description': request.args.get('description', type=str),
+        'min_progress': request.args.get('min_progress', type=float),
+        'max_progress': request.args.get('max_progress', type=float),
+        'sort_by': request.args.get('sort_by', 'Item Code', type=str),
+        'sort_order': request.args.get('sort_order', 'asc', type=str)
+    }
+    # حذف فیلترهایی که مقدار ندارند
+    active_filters = {k: v for k, v in filters.items() if v is not None}
+
+    data = dm.get_project_mto_summary(project_id, **active_filters)
+    return jsonify(data)
 
 @app.route("/api/reports/line-status")
 def get_line_status_report():
@@ -79,10 +90,36 @@ def get_shortage_report():
 
 @app.route("/api/reports/spool-inventory")
 def get_spool_inventory_report():
-    """گزارش موجودی انبار اسپول را برمی‌گرداند (این گزارش سراسری است)."""
-    data = dm.get_spool_inventory_report()
+    filters = {
+        'spool_id': request.args.get('spool_id', type=str),
+        'location': request.args.get('location', type=str),
+        'component_type': request.args.get('component_type', type=str),
+        'material': request.args.get('material', type=str),
+        'sort_by': request.args.get('sort_by', 'spool_id', type=str),
+        'sort_order': request.args.get('sort_order', 'asc', type=str),
+        'page': request.args.get('page', 1, type=int),
+        'per_page': request.args.get('per_page', 20, type=int)
+    }
+    active_filters = {k: v for k, v in filters.items() if v is not None}
+    data = dm.get_spool_inventory_report(**active_filters)
     return jsonify(data)
 
+
+@app.route("/api/reports/analytics/<report_name>")
+def get_analytics_report(report_name):
+    project_id = request.args.get("project_id", type=int)
+    # برخی گزارش‌ها ممکن است به project_id نیاز نداشته باشند
+    # if not project_id and report_name in ['line_progress_distribution', 'material_usage_by_type']:
+    #     return jsonify({"error": "project_id is required for this report"}), 400
+
+    # در اینجا می‌توانید پارامترهای بیشتری برای فیلتر کردن تحلیل‌ها بگیرید
+    # مثلاً بازه زمانی برای گزارش consumption_over_time
+    params = {}
+
+    data = dm.get_report_analytics(project_id, report_name, **params)
+    if "error" in data:
+        return jsonify(data), data.get("status_code", 500)
+    return jsonify(data)
 
 @app.route("/api/reports/spool-consumption")
 def get_spool_consumption_history():
