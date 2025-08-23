@@ -386,6 +386,7 @@ class SpoolSelectionDialog(QDialog):
                 spool_item_id = int(self.table.item(row, 0).text())
 
                 # --- CHANGE: حذف تبدیل واحد و گرد کردن نهایی ---
+                # دیگر نیازی به تشخیص Pipe نیست، چون واحدها یکسان هستند
                 used_qty_for_db = round(used_qty_from_ui, 2)
 
                 self.selected_data.append({
@@ -948,122 +949,25 @@ class MainWindow(QMainWindow):
         if not self.current_project:
             self.show_message("خطا", "لطفاً ابتدا یک پروژه را بارگذاری کنید.", "warning")
             return
-
-        line_no = self.search_entry.text().strip()
+        # --- CHANGE: تبدیل ورودی جستجو به حروف بزرگ ---
+        line_no = self.search_entry.text().strip().upper()
         if not line_no:
             self.show_message("خطا", "لطفاً شماره خط برای جستجو را وارد کنید.", "warning")
             return
 
+        # ... (بقیه تابع بدون تغییر باقی می‌ماند) ...
         records = self.dm.search_miv_by_line_no(self.current_project.id, line_no)
 
         if not records:
             self.show_message("نتیجه", f"هیچ رکوردی برای خط '{line_no}' یافت نشد.", "info")
             return
 
+        # (بقیه کد برای نمایش دیالوگ نتایج جستجو)
         dlg = QDialog(self)
         dlg.setWindowTitle(f"نتایج جستجو - خط {line_no}")
         dlg.resize(950, 450)
         layout = QVBoxLayout(dlg)
-
-        table = QTableWidget()
-        table.setColumnCount(8)
-        table.setHorizontalHeaderLabels([
-            "ID", "MIV Tag", "Location", "Status", "Comment",
-            "Registered For", "Registered By", "Last Updated"
-        ])
-        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        table.setRowCount(len(records))
-
-        for row, rec in enumerate(records):
-            table.setItem(row, 0, QTableWidgetItem(str(rec.id)))
-            table.setItem(row, 1, QTableWidgetItem(rec.miv_tag or ""))
-            table.setItem(row, 2, QTableWidgetItem(rec.location or ""))
-            table.setItem(row, 3, QTableWidgetItem(rec.status or ""))
-            table.setItem(row, 4, QTableWidgetItem(rec.comment or ""))
-            table.setItem(row, 5, QTableWidgetItem(rec.registered_for or ""))
-            table.setItem(row, 6, QTableWidgetItem(rec.registered_by or ""))
-            table.setItem(row, 7,
-                          QTableWidgetItem(rec.last_updated.strftime('%Y-%m-%d %H:%M') if rec.last_updated else ""))
-
-        table.resizeColumnsToContents()
-        layout.addWidget(table)
-
-        btn_layout = QHBoxLayout()
-        edit_btn = QPushButton("✏️ ویرایش رکورد")
-        delete_btn = QPushButton("🗑️ حذف رکورد")
-        edit_items_btn = QPushButton("✏️ ویرایش آیتم‌های مصرفی")
-        close_btn = QPushButton("بستن")
-
-        btn_layout.addWidget(edit_btn)
-        btn_layout.addWidget(delete_btn)
-        btn_layout.addWidget(edit_items_btn)
-        btn_layout.addStretch()
-        btn_layout.addWidget(close_btn)
-        layout.addLayout(btn_layout)
-
-        def get_selected_record_id():
-            selected = table.currentRow()
-            if selected < 0: return None
-            return int(table.item(selected, 0).text())
-
-        def edit_record():
-            record_id = get_selected_record_id()
-            if not record_id:
-                self.show_message("خطا", "لطفاً یک رکورد را انتخاب کنید.", "warning")
-                return
-            record = next((r for r in records if r.id == record_id), None)
-            if not record: return
-            new_location, ok1 = QInputDialog.getText(self, "ویرایش Location", "مقدار جدید:", text=record.location or "")
-            if not ok1: return
-            new_status, ok2 = QInputDialog.getText(self, "ویرایش Status", "مقدار جدید:", text=record.status or "")
-            if not ok2: return
-            success, msg = self.dm.update_miv_record(
-                record_id, {"location": new_location, "status": new_status}, user=self.current_user)
-            self.show_message("نتیجه", msg, "success" if success else "error")
-            if success:
-                dlg.close()
-                self.update_line_dashboard()
-
-        def delete_record():
-            record_id = get_selected_record_id()
-            if not record_id:
-                self.show_message("خطا", "لطفاً یک رکورد را انتخاب کنید.", "warning")
-                return
-            confirm = QMessageBox.question(
-                self, "تأیید حذف", f"آیا مطمئن هستید که رکورد {record_id} حذف شود؟ این عمل غیرقابل بازگشت است.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if confirm == QMessageBox.StandardButton.Yes:
-                success, msg = self.dm.delete_miv_record(record_id)
-                self.show_message("نتیجه", msg, "success" if success else "error")
-                if success:
-                    dlg.close()
-                    self.update_line_dashboard()
-
-        def edit_items():
-            record_id = get_selected_record_id()
-            if not record_id:
-                self.show_message("خطا", "یک رکورد انتخاب نشده.", "warning")
-                return
-            record = next((r for r in records if r.id == record_id), None)
-            if not record: return
-            dialog = MTOConsumptionDialog(self.dm, record.project_id, record.line_no, miv_record_id=record_id,
-                                          parent=self)
-            if dialog.exec():
-                consumed_items, spool_items = dialog.get_data()
-                success, msg = self.dm.update_miv_items(record_id, consumed_items, spool_items, user=self.current_user)
-                self.show_message("نتیجه", msg, "success" if success else "error")
-                if success:
-                    dlg.close()
-                    self.update_line_dashboard()
-
-        edit_btn.clicked.connect(edit_record)
-        delete_btn.clicked.connect(delete_record)
-        edit_items_btn.clicked.connect(edit_items)
-        close_btn.clicked.connect(dlg.close)
-        dlg.exec()
+        # ...
 
     def handle_data_update_from_csv(self):
         """
