@@ -723,27 +723,50 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(dev_label)
 
     def create_registration_form(self, parent_widget):
-        layout = QVBoxLayout(parent_widget)
-        layout.addWidget(QLabel("<h2>ثبت رکورد MIV جدید</h2>"))
+        # # ساخت لایه‌ی اصلی فرم ثبت
+        layout = QVBoxLayout(parent_widget)  # # چیدمان عمودی برای فرم
+        layout.addWidget(QLabel("<h2>ثبت رکورد MIV جدید</h2>"))  # # عنوان فرم
 
-        form_layout = QFormLayout()
-        self.entries = {}
-        fields = ["Line No", "MIV Tag", "Location", "Status", "Registered For"]
-        for field in fields:
-            self.entries[field] = QLineEdit()
-            form_layout.addRow(f"{field}:", self.entries[field])
+        form_layout = QFormLayout()  # # فرم دوبخشی لیبل/فیلد
+        self.entries = {}  # # دیکشنری نگهداری ویجت‌های ورودی
 
-        # 🔹 راه‌اندازی Completer برای فیلد Line No
-        self.line_completer_model = QStringListModel()
-        self.line_completer = QCompleter(self.line_completer_model, self)
-        self.line_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.line_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self.entries["Line No"].setCompleter(self.line_completer)
+        # # --- ردیف ویژه برای Line No با دکمه جستجوی فایل ---
+        line_row_container = QWidget()  # # کانتینر برای چینش افقی Line No + دکمه
+        line_row = QHBoxLayout(line_row_container)  # # چیدمان افقی
+        line_row.setContentsMargins(0, 0, 0, 0)  # # بدون حاشیه
 
-        self.register_btn = QPushButton("ثبت رکورد")
-        layout.addLayout(form_layout)
-        layout.addWidget(self.register_btn)
-        layout.addStretch()
+        self.entries["Line No"] = QLineEdit()  # # ورودی شماره خط
+        self.entries["Line No"].setPlaceholderText(
+            "شماره خط را وارد کنید (مثال: 10\"-P-210415-D6D-P).")  # # راهنمای ورودی
+
+        self.iso_search_btn = QPushButton("🔎 جستجوی فایل‌های ISO/DWG")  # # دکمه جدید برای جستجو
+        self.iso_search_btn.setToolTip(
+            "جستجو در Y:\\Piping\\ISO بر اساس 6 رقم اولِ Line No (بدون توجه به علائم و حروف).")  # # توضیح
+
+        line_row.addWidget(self.entries["Line No"], 1)  # # افزودن ورودی به ردیف
+        line_row.addWidget(self.iso_search_btn)  # # افزودن دکمه جستجو
+
+        form_layout.addRow("Line No:", line_row_container)  # # اضافه کردن ردیف Line No به فرم
+
+        # # --- بقیه فیلدها مثل قبل ---
+        for field in ["MIV Tag", "Location", "Status", "Registered For"]:  # # لیست فیلدهای دیگر
+            self.entries[field] = QLineEdit()  # # ایجاد ورودی
+            form_layout.addRow(f"{field}:", self.entries[field])  # # افزودن به فرم
+
+        # # راه‌اندازی Completer برای Line No (مثل قبل)
+        self.line_completer_model = QStringListModel()  # # مدل کامپلتر
+        self.line_completer = QCompleter(self.line_completer_model, self)  # # خود کامپلتر
+        self.line_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)  # # حساس نبودن به بزرگی حروف
+        self.line_completer.setFilterMode(Qt.MatchFlag.MatchContains)  # # جستجوی شامل
+        self.entries["Line No"].setCompleter(self.line_completer)  # # اتصال کامپلتر به فیلد
+
+        # # اتصال دکمه جستجو به هندلر جدید
+        self.iso_search_btn.clicked.connect(self.handle_iso_search)  # # اتصال کلیک به تابع جستجو و نمایش نتایج
+
+        self.register_btn = QPushButton("ثبت رکورد")  # # دکمه ثبت
+        layout.addLayout(form_layout)  # # افزودن فرم به چیدمان
+        layout.addWidget(self.register_btn)  # # افزودن دکمه ثبت
+        layout.addStretch()  # # کشسان برای پر کردن فضا
 
     def create_dashboard(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
@@ -1118,6 +1141,77 @@ class MainWindow(QMainWindow):
             self.log_to_console(message, "error")
             self.show_message("خطا", message, "error")
 
+    def handle_iso_search(self):
+        raw_line = (self.entries.get("Line No").text() if self.entries.get("Line No") else "").strip()
+        if not raw_line:
+            self.log_to_console("⚠️ لطفاً ابتدا Line No را وارد کنید.", level="warning")
+            return
+
+        force_refresh = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        try:
+            matches = self.dm.find_iso_files(
+                raw_line,
+                base_dir=r"Y:\Piping\ISO",
+                limit=500,
+                force_refresh=force_refresh
+            )
+        except Exception as e:
+            self.log_to_console(f"❌ جستجوی فایل‌ها با خطا مواجه شد: {e}", level="error")
+            return
+
+        if not matches:
+            self.log_to_console("⚠️ فایلی مطابق با Line No واردشده پیدا نشد.", level="warning")
+            return
+
+        self.log_to_console(f"✅ {len(matches)} فایل پیدا شد.", level="success")
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("انتخاب و باز کردن فایل‌های ISO/DWG")
+        dlg.resize(900, 500)
+
+        v = QVBoxLayout(dlg)
+        info = QLabel(
+            "برای باز کردن فایل دوبار کلیک کنید یا روی «Open» بزنید.\n(پنجره باز می‌ماند تا چند فایل انتخاب کنید)")
+        v.addWidget(info)
+
+        table = QTableWidget(len(matches), 2, dlg)
+        table.setHorizontalHeaderLabels(["File", "Folder"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        v.addWidget(table)
+
+        for r, path in enumerate(matches):
+            name = os.path.basename(path)
+            folder = os.path.dirname(path)
+            table.setItem(r, 0, QTableWidgetItem(name))
+            table.setItem(r, 1, QTableWidgetItem(folder))
+
+        row_to_path = {i: p for i, p in enumerate(matches)}
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Close,
+                                parent=dlg)
+        v.addWidget(btns)
+
+        def _open_selected():
+            row = table.currentRow()
+            if row < 0:
+                return
+            path = row_to_path.get(row)
+            try:
+                os.startfile(path)
+                self.log_to_console(f"📂 فایل باز شد: {path}", level="info")
+            except Exception as e:
+                self.log_to_console(f"❌ خطا در باز کردن فایل {path}: {e}", level="error")
+
+        btns.button(QDialogButtonBox.StandardButton.Open).clicked.connect(_open_selected)
+        btns.rejected.connect(dlg.reject)
+        table.cellDoubleClicked.connect(lambda *_: _open_selected())
+
+        dlg.exec()
+
     def update_line_dashboard(self):
         if not self.current_project:
             return
@@ -1242,6 +1336,7 @@ class MainWindow(QMainWindow):
         <p><i>Built with Python, PyQt6, and SQLAlchemy.</i></p>
         """
         QMessageBox.about(self, title, text)
+
 
 
 if __name__ == "__main__":

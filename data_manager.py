@@ -14,6 +14,7 @@ import difflib
 import logging
 import re
 from typing import Tuple, List, Dict, Any
+import glob
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -2081,3 +2082,93 @@ class DataManager:
 
         # --- CHANGE: با افزودن .copy()، یک DataFrame جدید و مستقل ساخته می‌شود ---
         return df[final_cols].copy()
+
+    # --------------------------------------------------------------------
+    # متدهای لازم برای جستجوی ایزو ها
+    # --------------------------------------------------------------------
+
+    def _normalize_line_key(self, text: str) -> str:
+        # # نرمال‌سازی: حذف علائم/فاصله/نقل‌قول و یکسان‌سازی حروف
+        import re  # # ایمپورت محلی برای پرهیز از تغییر ابتدای فایل
+        if not text:
+            return ""
+        t = text.upper()  # # بزرگ‌کردن برای بی‌توجهی به کیس
+        t = re.sub(r'[^A-Z0-9]+', '', t)  # # حذف هرچیز جز حروف/اعداد
+        return t  # # رشته‌ی نرمال‌شده
+
+    def _extract_prefix_key(self, text: str) -> str:
+        # # استخراج هسته: «تا پایان اولین دنباله 6 رقمی» از رشته نرمال‌شده (طبق نیاز شما)
+        import re  # # ایمپورت محلی
+        norm = self._normalize_line_key(text)  # # نرمال‌سازی ورودی
+        m = re.search(r'(\d{6})', norm)  # # یافتن اولین 6 رقم
+        if not m:
+            return norm  # # اگر نبود، کل نرمال را برگردان
+        end = m.end(1)  # # انتهای 6 رقم
+        return norm[:end]  # # برش از ابتدا تا انتهای 6 رقم
+
+    def find_iso_files(self, line_text: str, base_dir: str = r"Y:\Piping\ISO", limit: int = 200,
+                       force_refresh: bool = False) -> list[str]:
+        import os, time, json, hashlib
+
+        # مسیر فایل کش روی دیسک
+        cache_file = os.path.join(os.path.dirname(__file__), "iso_index_cache.json")
+
+        # اگر کش حافظه نداریم → از فایل بخونیم
+        if not hasattr(self, "_iso_index"):
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    self._iso_index = [(k, v) for k, v in data.get("index", [])]
+                    self._iso_index_built_at = data.get("built_at", 0.0)
+                    self._iso_index_dir = data.get("base_dir", base_dir)
+                except Exception:
+                    self._iso_index = None
+                    self._iso_index_built_at = 0
+                    self._iso_index_dir = None
+            else:
+                self._iso_index = None
+                self._iso_index_built_at = 0
+                self._iso_index_dir = None
+
+        ttl = 15 * 60
+        expired = (time.time() - (self._iso_index_built_at or 0)) > ttl
+        if force_refresh or (self._iso_index is None) or (self._iso_index_dir != base_dir) or expired:
+            idx = []
+            for root, _, files in os.walk(base_dir):
+                for fn in files:
+                    low = fn.lower()
+                    if low.endswith(".pdf") or low.endswith(".dwg"):
+                        key = self._normalize_line_key(fn)
+                        idx.append((key, os.path.join(root, fn)))
+            self._iso_index = idx
+            self._iso_index_built_at = time.time()
+            self._iso_index_dir = base_dir
+
+            # ذخیره روی دیسک
+            try:
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "index": self._iso_index,
+                        "built_at": self._iso_index_built_at,
+                        "base_dir": self._iso_index_dir
+                    }, f, ensure_ascii=False)
+            except Exception:
+                pass
+
+        prefix = self._extract_prefix_key(line_text)
+        norm_input = self._normalize_line_key(line_text)
+
+        res = [path for key, path in self._iso_index if key.startswith(prefix)]
+        if not res:
+            res = [path for key, path in self._iso_index if norm_input in key]
+
+        # لاگ کردن سرچ‌های موفق در فایل
+        log_file = os.path.join(os.path.dirname(__file__), "iso_search_log.txt")
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {line_text} | {len(res)} result(s)\n")
+        except Exception:
+            pass
+
+        return res[: max(1, int(limit))]
