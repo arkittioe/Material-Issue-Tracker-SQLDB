@@ -3,12 +3,13 @@
 from flask import Flask, jsonify, request
 from data_manager import DataManager
 from flask_cors import CORS
+from config_manager import DB_PATH
 
 app = Flask(__name__)
 # فعال کردن CORS برای اینکه داشبورد بتواند به راحتی با API ارتباط برقرار کند
 CORS(app)
 
-dm = DataManager(db_path="miv_registry.db")
+dm = DataManager(db_path=DB_PATH)
 
 
 # --- Endpoints پایه ---

@@ -21,3 +21,5 @@ Test.py
 
 test.py
 FILEDB.py
+backupdb.py
+test_data_manager.py

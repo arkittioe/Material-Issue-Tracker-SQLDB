@@ -17,6 +17,7 @@ from typing import Tuple, List, Dict, Any
 import glob
 from sqlalchemy.engine import Engine
 import time
+from config_manager import DB_PATH, DASHBOARD_PASSWORD, ISO_PATH
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -41,7 +42,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor.close()
 
 class DataManager:
-    def __init__(self, db_path="miv_registry.db"):
+    def __init__(self, db_path= DB_PATH):
         """
         (بهینه‌سازی شده برای شبکه)
         کلاس مدیریت تمام تعاملات با پایگاه داده.

@@ -29,7 +29,7 @@ import threading
 import time
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-
+from config_manager import DB_PATH, DASHBOARD_PASSWORD, ISO_PATH
 
 class IsoIndexEventHandler(QObject, FileSystemEventHandler):  # 👈 **ORDER SWAPPED HERE**
     """
@@ -384,7 +384,7 @@ class SpoolSelectionDialog(QDialog):
             # ... (ستون‌های 2 تا 9 بدون تغییر)
             self.table.setItem(row, 2, QTableWidgetItem(item.item_code or ""))
             self.table.setItem(row, 3, QTableWidgetItem(item.component_type or ""))
-            self.table.setItem(row, 4, QTableWidgetItem(item.class_angle or ""))
+            self.table.setItem(row, 4, QTableWidgetItem(str(item.class_angle) if item.class_angle is not None else ""))
             self.table.setItem(row, 5, QTableWidgetItem(str(item.p1_bore or "")))
             self.table.setItem(row, 6, QTableWidgetItem(str(item.p2_bore or "")))
             self.table.setItem(row, 7, QTableWidgetItem(item.material or ""))
@@ -699,11 +699,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("مدیریت MIV - نسخه 1.0")
         self.setGeometry(100, 100, 1200, 800)
 
-        self.dm = DataManager(db_path="miv_registry.db")
+        self.dm = DataManager(db_path=DB_PATH)
         self.current_project: Project | None = None
         self.current_user = os.getlogin()
         self.suggestion_data = []
-        self.dashboard_password = "hossein"
+        self.dashboard_password = "hossein"#DASHBOARD_PASSWORD
 
         self.iso_observer = None  # متغیر برای نگه داشتن ترد نگهبان
 
@@ -879,8 +879,7 @@ class MainWindow(QMainWindow):
         self.update_data_btn = QPushButton("🔄 به‌روزرسانی از CSV")  # دکمه جدید
         self.update_data_btn.setStyleSheet("background-color: #6272a4;")  # رنگ متمایز
 
-        management_layout.addWidget(self.manage_spool_btn)
-        management_layout.addWidget(self.update_data_btn)
+
 
         # --- NEW: اضافه کردن QProgressBar برای نمایش وضعیت ایندکس ---
         self.iso_progress_bar = QProgressBar()
@@ -896,10 +895,11 @@ class MainWindow(QMainWindow):
         self.console_output.setFont(QFont("Consolas", 11))
         self.console_output.setStyleSheet("background-color: #2b2b2b; color: #f8f8f2;")
 
-
-        layout.addLayout(management_layout)  # اضافه کردن چیدمان دکمه‌ها
-
         layout.addWidget(self.console_output, 1)
+        layout.addLayout(management_layout)  # اضافه کردن چیدمان دکمه‌ها
+        management_layout.addWidget(self.manage_spool_btn)
+        management_layout.addWidget(self.update_data_btn)
+
         layout.addWidget(self.iso_progress_bar)
 
     def connect_signals(self):
@@ -1429,7 +1429,7 @@ class MainWindow(QMainWindow):
             self.log_to_console(f"ISO Indexer: {message}", level)
 
     def start_iso_watcher(self):
-        path = r"Y:\Piping\ISO"  # مسیر را در صورت نیاز تغییر دهید
+        path = ISO_PATH  # مسیر را در صورت نیاز تغییر دهید
         if not os.path.isdir(path):
             self.update_iso_status_label(f"مسیر یافت نشد!", "error")
             return
