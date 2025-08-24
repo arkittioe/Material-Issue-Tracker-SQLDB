@@ -9,11 +9,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QComboBox, QPushButton, QTextEdit, QFrame, QMessageBox, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QSplitter,
-    QCompleter, QInputDialog, QFileDialog, QGroupBox
+    QCompleter, QInputDialog, QFileDialog, QGroupBox, QProgressBar
 )
 
 from PyQt6.QtGui import QFont, QColor
-from PyQt6.QtCore import Qt, QStringListModel
+from PyQt6.QtCore import Qt, QStringListModel, pyqtSignal, QObject
 
 # برای نمایش نمودار در PyQt6
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -24,6 +24,53 @@ from data_manager import DataManager
 from models import Project, MTOItem, MIVRecord, Spool, SpoolItem  # برای type hinting
 
 import sys, traceback
+
+import threading
+import time
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+
+class IsoIndexEventHandler(QObject, FileSystemEventHandler):  # 👈 **ORDER SWAPPED HERE**
+    """
+    This class reacts to file system changes (create, delete, modify)
+    and calls the appropriate DataManager functions to update the database.
+    """
+    status_updated = pyqtSignal(str, str)
+    progress_updated = pyqtSignal(int)
+
+    def __init__(self, dm: DataManager):
+        # The super().__init__() call now correctly initializes the QObject first.
+        super().__init__()
+        # We no longer need to call FileSystemEventHandler.__init__() separately.
+
+        self.dm = dm
+        self.SUPPORTED_EXTENSIONS = {".pdf", ".dwg"}
+
+    def _is_supported(self, path):
+        return os.path.splitext(path)[1].lower() in self.SUPPORTED_EXTENSIONS
+
+    def on_created(self, event):
+        if not event.is_directory and self._is_supported(event.src_path):
+            print(f"File created: {event.src_path}")
+            self.dm.upsert_iso_index_entry(event.src_path)
+
+    def on_deleted(self, event):
+        if not event.is_directory and self._is_supported(event.src_path):
+            print(f"File deleted: {event.src_path}")
+            self.dm.remove_iso_index_entry(event.src_path)
+
+    def on_modified(self, event):
+        if not event.is_directory and self._is_supported(event.src_path):
+            print(f"File modified: {event.src_path}")
+            self.dm.upsert_iso_index_entry(event.src_path)
+
+    def on_moved(self, event):
+        if not event.is_directory and self._is_supported(event.src_path):
+            print(f"File moved: from {event.src_path} to {event.dest_path}")
+            self.dm.remove_iso_index_entry(event.src_path)
+            if self._is_supported(event.dest_path):
+                self.dm.upsert_iso_index_entry(event.dest_path)
 
 
 class SpoolManagerDialog(QDialog):
@@ -658,12 +705,18 @@ class MainWindow(QMainWindow):
         self.suggestion_data = []
         self.dashboard_password = "hossein"
 
+        self.iso_observer = None  # متغیر برای نگه داشتن ترد نگهبان
+
+        # تعریف یک سیگنال در کلاس اصلی برای دریافت پیام از ترد نگهبان
+        self.iso_event_handler = IsoIndexEventHandler(self.dm)
         # --- NEW: راه‌اندازی منوی بالای پنجره ---
         self.setup_menu()
         self.setup_ui()
         self.connect_signals()
         self.populate_project_combo()
         QApplication.instance().aboutToQuit.connect(self.cleanup_processes)
+
+        self.start_iso_watcher()
 
     def setup_menu(self):
         """یک منوی Help در بالای پنجره اصلی ایجاد می‌کند."""
@@ -723,13 +776,14 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(dev_label)
 
     def create_registration_form(self, parent_widget):
+
         # # ساخت لایه‌ی اصلی فرم ثبت
         layout = QVBoxLayout(parent_widget)  # # چیدمان عمودی برای فرم
         layout.addWidget(QLabel("<h2>ثبت رکورد MIV جدید</h2>"))  # # عنوان فرم
 
+
         form_layout = QFormLayout()  # # فرم دوبخشی لیبل/فیلد
         self.entries = {}  # # دیکشنری نگهداری ویجت‌های ورودی
-
         # # --- ردیف ویژه برای Line No با دکمه جستجوی فایل ---
         line_row_container = QWidget()  # # کانتینر برای چینش افقی Line No + دکمه
         line_row = QHBoxLayout(line_row_container)  # # چیدمان افقی
@@ -787,6 +841,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.details_btn)
 
     def create_search_box(self, parent_widget):
+
         layout = QVBoxLayout(parent_widget)
         layout.addWidget(QLabel("<h3>جستجو و نمایش</h3>"))
 
@@ -812,6 +867,12 @@ class MainWindow(QMainWindow):
         project_layout.addWidget(self.project_combo, 1)
         project_layout.addWidget(self.load_project_btn)
 
+        layout.addLayout(project_layout)
+
+        # --- NEW: لیبل برای نمایش وضعیت همگام‌سازی ISO ---
+        self.iso_status_label = QLabel("وضعیت ایندکس ISO: در حال بررسی...")
+        self.iso_status_label.setStyleSheet("padding: 4px; color: #f1fa8c;")  # رنگ زرد برای حالت اولیه
+
         # --- NEW: دکمه‌های مدیریت و آپدیت داده ---
         management_layout = QHBoxLayout()
         self.manage_spool_btn = QPushButton("مدیریت اسپول‌ها")
@@ -821,14 +882,25 @@ class MainWindow(QMainWindow):
         management_layout.addWidget(self.manage_spool_btn)
         management_layout.addWidget(self.update_data_btn)
 
+        # --- NEW: اضافه کردن QProgressBar برای نمایش وضعیت ایندکس ---
+        self.iso_progress_bar = QProgressBar()
+        self.iso_progress_bar.setRange(0, 100)
+        self.iso_progress_bar.setValue(0)
+        self.iso_progress_bar.setTextVisible(True)
+        self.iso_progress_bar.setFormat("ایندکس ISO: %p%")
+        self.iso_progress_bar.hide()  # در ابتدا مخفی است
+
+
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.console_output.setFont(QFont("Consolas", 11))
         self.console_output.setStyleSheet("background-color: #2b2b2b; color: #f8f8f2;")
 
-        layout.addLayout(project_layout)
+
         layout.addLayout(management_layout)  # اضافه کردن چیدمان دکمه‌ها
+
         layout.addWidget(self.console_output, 1)
+        layout.addWidget(self.iso_progress_bar)
 
     def connect_signals(self):
         self.load_project_btn.clicked.connect(self.load_project)
@@ -846,6 +918,10 @@ class MainWindow(QMainWindow):
         self.manage_spool_btn.clicked.connect(self.open_spool_manager)
 
         self.update_data_btn.clicked.connect(self.handle_data_update_from_csv)
+        self.iso_event_handler.status_updated.connect(self.update_iso_status_label)
+
+        # --- NEW: اتصال سیگنال پیشرفت به اسلات جدید ---
+        self.iso_event_handler.progress_updated.connect(self.update_iso_progress)
 
     def populate_project_combo(self):
         self.project_combo.clear()
@@ -921,51 +997,56 @@ class MainWindow(QMainWindow):
             self.show_message("خطا", "لطفاً ابتدا یک پروژه را بارگذاری کنید.", "warning")
             return
 
-        # --- CHANGE: تبدیل تمام ورودی‌های فرم به حروف بزرگ ---
         form_data = {field: widget.text().strip().upper() for field, widget in self.entries.items()}
-        form_data["Registered By"] = self.current_user  # نام کاربر نیازی به تغییر ندارد
-        form_data["Complete"] = False
-        form_data["Comment"] = ""  # کامنت به صورت خودکار ساخته می‌شود
+        form_data["Registered By"] = self.current_user
+        form_data["Complete"] = False  # پیش‌فرض
 
         if not form_data["Line No"] or not form_data["MIV Tag"]:
             self.show_message("خطا", "فیلدهای Line No و MIV Tag اجباری هستند.", "warning")
             return
 
-        # ... (بقیه تابع بدون تغییر باقی می‌ماند) ...
         if self.dm.is_duplicate_miv_tag(form_data["MIV Tag"], self.current_project.id):
             self.show_message("خطا", f"تگ '{form_data['MIV Tag']}' در این پروژه تکراری است.", "error")
             return
 
+        # اطمینان از وجود رکوردهای پیشرفت برای این خط
         self.dm.initialize_mto_progress_for_line(self.current_project.id, form_data["Line No"])
 
         dialog = MTOConsumptionDialog(self.dm, self.current_project.id, form_data["Line No"], parent=self)
+        if not dialog.exec():
+            self.log_to_console("ثبت رکورد لغو شد.", "warning")
+            return
 
-        if dialog.exec():
-            consumed_items, spool_items = dialog.get_data()
-            if not consumed_items and not spool_items:
-                self.log_to_console("ثبت رکورد لغو شد چون هیچ آیتمی مصرف نشده بود.", "warning")
-                return
+        consumed_items, spool_items = dialog.get_data()
+        if not consumed_items and not spool_items:
+            self.log_to_console("ثبت رکورد لغو شد چون هیچ آیتمی مصرف نشده بود.", "warning")
+            return
 
-            comment_parts = []
-            if consumed_items:
-                for item in consumed_items:
-                    mto_details = self.dm.get_mto_item_by_id(item['mto_item_id'])
-                    if mto_details:
-                        identifier = mto_details.item_code or mto_details.description or f"Item ID {mto_details.id}"
-                        comment_parts.append(f"{item['used_qty']} * {identifier}")
+        # (بهینه‌سازی شده) ساخت کامنت بدون کوئری اضافه
+        comment_parts = []
+        if consumed_items:
+            # dialog.progress_data حاوی تمام اطلاعات مورد نیاز است
+            mto_info_map = {item['mto_item_id']: item for item in dialog.progress_data}
+            for item in consumed_items:
+                mto_details = mto_info_map.get(item['mto_item_id'])
+                if mto_details:
+                    identifier = mto_details.get("Item Code") or mto_details.get(
+                        "Description") or f"ID {mto_details['mto_item_id']}"
+                    comment_parts.append(f"{item['used_qty']} x {identifier}")
 
-            form_data["Comment"] = ", ".join(comment_parts)
+        form_data["Comment"] = " | ".join(comment_parts)
 
-            success, msg = self.dm.register_miv_record(self.current_project.id, form_data, consumed_items, spool_items)
+        success, msg = self.dm.register_miv_record(self.current_project.id, form_data, consumed_items, spool_items)
 
-            if success:
-                self.log_to_console(msg, "success")
-                self.update_line_dashboard()
-                self.entries["MIV Tag"].clear()
-                self.entries["Location"].clear()
-                self.entries["Status"].clear()
-            else:
-                self.log_to_console(msg, "error")
+        if success:
+            self.log_to_console(msg, "success")
+            self.update_line_dashboard()
+            # پاک کردن فیلدهای فرم پس از ثبت موفق
+            for field in ["MIV Tag", "Location", "Status"]:
+                if field in self.entries:
+                    self.entries[field].clear()
+        else:
+            self.log_to_console(msg, "error")
 
     def handle_search(self):
         if not self.current_project:
@@ -1147,15 +1228,9 @@ class MainWindow(QMainWindow):
             self.log_to_console("⚠️ لطفاً ابتدا Line No را وارد کنید.", level="warning")
             return
 
-        force_refresh = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
-
         try:
-            matches = self.dm.find_iso_files(
-                raw_line,
-                base_dir=r"Y:\Piping\ISO",
-                limit=500,
-                force_refresh=force_refresh
-            )
+            # جستجو حالا بسیار ساده و سریع است و به هیچ پارامتر اضافه‌ای نیاز ندارد
+            matches = self.dm.find_iso_files(raw_line)
         except Exception as e:
             self.log_to_console(f"❌ جستجوی فایل‌ها با خطا مواجه شد: {e}", level="error")
             return
@@ -1166,14 +1241,14 @@ class MainWindow(QMainWindow):
 
         self.log_to_console(f"✅ {len(matches)} فایل پیدا شد.", level="success")
 
+        # --- بخش نمایش دیالوگ نتایج (بدون تغییر) ---
         dlg = QDialog(self)
         dlg.setWindowTitle("انتخاب و باز کردن فایل‌های ISO/DWG")
         dlg.resize(900, 500)
 
-        v = QVBoxLayout(dlg)
-        info = QLabel(
-            "برای باز کردن فایل دوبار کلیک کنید یا روی «Open» بزنید.\n(پنجره باز می‌ماند تا چند فایل انتخاب کنید)")
-        v.addWidget(info)
+        v_layout = QVBoxLayout(dlg)
+        info_label = QLabel("برای باز کردن فایل دوبار کلیک کنید یا روی «Open» بزنید.")
+        v_layout.addWidget(info_label)
 
         table = QTableWidget(len(matches), 2, dlg)
         table.setHorizontalHeaderLabels(["File", "Folder"])
@@ -1181,7 +1256,7 @@ class MainWindow(QMainWindow):
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        v.addWidget(table)
+        v_layout.addWidget(table)
 
         for r, path in enumerate(matches):
             name = os.path.basename(path)
@@ -1191,9 +1266,9 @@ class MainWindow(QMainWindow):
 
         row_to_path = {i: p for i, p in enumerate(matches)}
 
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Close,
-                                parent=dlg)
-        v.addWidget(btns)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Close,
+                                   parent=dlg)
+        v_layout.addWidget(buttons)
 
         def _open_selected():
             row = table.currentRow()
@@ -1206,8 +1281,8 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.log_to_console(f"❌ خطا در باز کردن فایل {path}: {e}", level="error")
 
-        btns.button(QDialogButtonBox.StandardButton.Open).clicked.connect(_open_selected)
-        btns.rejected.connect(dlg.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Open).clicked.connect(_open_selected)
+        buttons.rejected.connect(dlg.reject)
         table.cellDoubleClicked.connect(lambda *_: _open_selected())
 
         dlg.exec()
@@ -1291,16 +1366,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.show_message("خطا", f"خطا در اجرای سرورهای گزارش‌گیری: {e}", "error")
 
-    def cleanup_processes(self):
-        """کشتن کامل پروسه‌های جانبی"""
-        try:
-            if hasattr(self, 'api_process') and self.api_process:
-                self.api_process.kill()
-            if hasattr(self, 'dashboard_process') and self.dashboard_process:
-                self.dashboard_process.kill()
-        except Exception as e:
-            print(f"⚠️ خطا در بستن پروسه‌ها: {e}")
-
     def open_spool_manager(self):
         # dlg = QInputDialog(self)
         # dlg.setWindowTitle("ورود رمز")
@@ -1337,7 +1402,62 @@ class MainWindow(QMainWindow):
         """
         QMessageBox.about(self, title, text)
 
+    def cleanup_processes(self):
+        """کشتن کامل پروسه‌های جانبی و ترد نگهبان."""
+        # ... کد قبلی برای بستن api_process و dashboard_process ...
+        try:
+            if hasattr(self, 'api_process') and self.api_process:
+                self.api_process.kill()
+            if hasattr(self, 'dashboard_process') and self.dashboard_process:
+                self.dashboard_process.kill()
 
+            # توقف ترد نگهبان
+            if self.iso_observer:
+                self.iso_observer.stop()
+                self.iso_observer.join() # منتظر می‌مانیم تا ترد کاملا بسته شود
+                print("ISO watcher stopped.")
+
+        except Exception as e:
+            print(f"⚠️ خطا در بستن پروسه‌ها: {e}")
+
+    def update_iso_status_label(self, message, level):
+        color_map = {"info": "#8be9fd", "success": "#50fa7b", "warning": "#f1fa8c", "error": "#ff5555"}
+        color = color_map.get(level, "#f8f8f2")
+        self.iso_status_label.setText(f"وضعیت ایندکس ISO: {message}")
+        self.iso_status_label.setStyleSheet(f"padding: 4px; color: {color};")
+        if level != "error":
+            self.log_to_console(f"ISO Indexer: {message}", level)
+
+    def start_iso_watcher(self):
+        path = r"Y:\Piping\ISO"  # مسیر را در صورت نیاز تغییر دهید
+        if not os.path.isdir(path):
+            self.update_iso_status_label(f"مسیر یافت نشد!", "error")
+            return
+
+        self.update_iso_status_label("در حال همگام‌سازی اولیه...", "warning")
+
+        # --- CHANGE: ارسال کل event_handler به جای فقط سیگنال ---
+        threading.Thread(target=self.dm.rebuild_iso_index_from_scratch,
+                         args=(path, self.iso_event_handler), daemon=True).start()
+
+        if self.iso_observer:
+            self.iso_observer.stop()
+            self.iso_observer.join()
+
+        self.iso_observer = Observer()
+        self.iso_observer.schedule(self.iso_event_handler, path, recursive=True)
+        self.iso_observer.start()
+
+    def update_iso_progress(self, value):
+        """اسلات برای آپدیت کردن مقدار QProgressBar."""
+        if value < 100:
+            if not self.iso_progress_bar.isVisible():
+                self.iso_progress_bar.show()
+            self.iso_progress_bar.setValue(value)
+        else:
+            # وقتی کامل شد، آن را مخفی کرده و پیام موفقیت را نشان می‌دهیم
+            self.iso_progress_bar.hide()
+            self.iso_progress_bar.setValue(0)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

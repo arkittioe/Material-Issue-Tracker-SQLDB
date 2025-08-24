@@ -199,6 +199,16 @@ class SpoolProgress(Base):
     remaining_qty = Column(Float, default=0)                        # باقی‌مانده اسپول
     timestamp = Column(DateTime, default=datetime.now)
 
+# -------------------------
+# جدول ایندکس فایل‌های ISO (برای کش)
+# -------------------------
+class IsoFileIndex(Base):
+    __tablename__ = 'iso_file_index'
+    id = Column(Integer, primary_key=True)
+    file_path = Column(String, unique=True, nullable=False)
+    normalized_name = Column(String, index=True) # ایندکس برای جستجوی سریع
+    prefix_key = Column(String, index=True) # ایندکس برای جستجوی سریع
+    last_modified = Column(DateTime)
 
 # -------------------------
 # تابع ایجاد دیتابیس و جداول

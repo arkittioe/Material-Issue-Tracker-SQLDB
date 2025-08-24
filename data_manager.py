@@ -1,12 +1,12 @@
 # file: data_manager.py
 
 import os
-from sqlalchemy import create_engine, func, desc
+from sqlalchemy import create_engine, func, desc, event
 from sqlalchemy.orm import sessionmaker, joinedload
 from functools import lru_cache
 from datetime import datetime
 from models import Base, Project, MIVRecord, MTOItem, MTOConsumption, ActivityLog, MTOProgress, Spool, SpoolItem, \
-    SpoolConsumption, SpoolProgress
+    SpoolConsumption, SpoolProgress, IsoFileIndex
 import numpy as np
 import pandas as pd
 import difflib
@@ -15,6 +15,8 @@ import logging
 import re
 from typing import Tuple, List, Dict, Any
 import glob
+from sqlalchemy.engine import Engine
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -28,18 +30,30 @@ SPOOL_TYPE_MAPPING = {
 
     # ... شما می‌توانید آیتم‌های بیشتری به اینجا اضافه کنید
 }
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """این تابع هر بار که یک اتصال به دیتابیس برقرار می‌شود، حالت WAL را فعال می‌کند."""
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+    finally:
+        cursor.close()
 
 class DataManager:
     def __init__(self, db_path="miv_registry.db"):
         """
+        (بهینه‌سازی شده برای شبکه)
         کلاس مدیریت تمام تعاملات با پایگاه داده.
         """
-        # ساخت اتصال به دیتابیس SQLite
-        self.engine = create_engine(f"sqlite:///{db_path}", echo=False)
-        # اگر جداول وجود نداشتند، بر اساس مدل‌ها ساخته می‌شوند
+        # ساخت اتصال به دیتابیس SQLite با تنظیمات مناسب برای کار روی شبکه
+        self.engine = create_engine(
+            f"sqlite:///{db_path}",
+            echo=False,
+            connect_args={'timeout': 15}  # افزایش زمان انتظار برای آزاد شدن قفل به ۱۵ ثانیه
+        )
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
-
     def get_session(self):
         """یک سشن جدید برای ارتباط با دیتابیس ایجاد می‌کند."""
         return self.Session()
@@ -298,71 +312,98 @@ class DataManager:
             session.close()
 
     def rebuild_mto_progress_for_line(self, project_id, line_no):
+        """
+        (بهینه‌سازی شده)
+        آمار پیشرفت تمام آیتم‌های MTO یک خط را با استفاده از یک کوئری جامع و بهینه بازسازی می‌کند.
+        """
         session = self.get_session()
         try:
-            mto_items_in_line = session.query(MTOItem).filter(
-                MTOItem.project_id == project_id,
-                MTOItem.line_no == line_no
-            ).all()
+            # گام ۱: تمام MTO Item های مورد نیاز را به همراه مصرف مستقیم (direct_used) واکشی می‌کنیم.
+            # از left join استفاده می‌شود تا آیتم‌های بدون مصرف هم لیست شوند.
+            base_query = (
+                session.query(
+                    MTOItem,
+                    func.coalesce(func.sum(MTOConsumption.used_qty), 0.0).label("direct_used")
+                )
+                .outerjoin(MTOConsumption, MTOItem.id == MTOConsumption.mto_item_id)
+                .filter(MTOItem.project_id == project_id, MTOItem.line_no == line_no)
+                .group_by(MTOItem.id)
+            )
 
-            for mto_item in mto_items_in_line:
-                # --- CHANGE: حذف تبدیل واحد ---
+            mto_items_with_direct_usage = base_query.all()
+            if not mto_items_with_direct_usage:
+                return  # اگر خط هیچ آیتمی نداشت، خارج شو
+
+            # گام ۲: تمام مصرف‌های اسپول مربوط به این خط را یک‌جا واکشی می‌کنیم.
+            spool_consumptions_in_line = (
+                session.query(
+                    func.upper(SpoolItem.component_type).label("spool_type"),
+                    SpoolItem.p1_bore,
+                    func.sum(SpoolConsumption.used_qty).label("total_spool_used")
+                )
+                .join(MIVRecord, SpoolConsumption.miv_record_id == MIVRecord.id)
+                .join(SpoolItem, SpoolConsumption.spool_item_id == SpoolItem.id)
+                .filter(MIVRecord.project_id == project_id, MIVRecord.line_no == line_no)
+                .group_by("spool_type", SpoolItem.p1_bore)
+                .all()
+            )
+
+            # گام ۳: مصرف اسپول را در یک دیکشنری برای دسترسی سریع آماده می‌کنیم.
+            spool_usage_map = {
+                (usage.spool_type, usage.p1_bore): usage.total_spool_used
+                for usage in spool_consumptions_in_line
+            }
+
+            progress_updates = []
+            mto_item_ids_in_line = [item.id for item, _ in mto_items_with_direct_usage]
+
+            # گام ۴: روی نتایج واکشی شده حرکت کرده و محاسبات را در پایتون انجام می‌دهیم.
+            for mto_item, direct_used in mto_items_with_direct_usage:
                 is_pipe = mto_item.item_type and 'pipe' in mto_item.item_type.lower()
-                total_required = mto_item.length_m or 0 if is_pipe else mto_item.quantity or 0
+                total_required = mto_item.length_m if is_pipe else mto_item.quantity
 
-                direct_used = session.query(func.coalesce(func.sum(MTOConsumption.used_qty), 0.0)).filter(
-                    MTOConsumption.mto_item_id == mto_item.id
-                ).scalar()
-
-                # ... (منطق پیدا کردن spool_equivalents بدون تغییر) ...
+                # پیدا کردن مصرف اسپول معادل
                 mto_type_upper = str(mto_item.item_type).upper().strip()
-                spool_equivalents = [mto_type_upper]
+                spool_equivalents = {mto_type_upper}
                 for key, aliases in SPOOL_TYPE_MAPPING.items():
                     if mto_type_upper == key or mto_type_upper in aliases:
-                        spool_equivalents.extend([key] + list(aliases));
+                        spool_equivalents.update([key] + list(aliases))
                         break
-                spool_equivalents = list(set(spool_equivalents))
 
-                spool_used_query = session.query(func.coalesce(func.sum(SpoolConsumption.used_qty), 0.0)).join(
-                    MIVRecord, SpoolConsumption.miv_record_id == MIVRecord.id
-                ).join(
-                    SpoolItem, SpoolConsumption.spool_item_id == SpoolItem.id
-                ).filter(
-                    MIVRecord.line_no == line_no,
-                    MIVRecord.project_id == project_id,
-                    func.upper(SpoolItem.component_type).in_(spool_equivalents),
-                )
-                if mto_item.p1_bore_in is not None:
-                    spool_used_query = spool_used_query.filter(SpoolItem.p1_bore == mto_item.p1_bore_in)
+                spool_used = 0
+                for eq_type in spool_equivalents:
+                    spool_used += spool_usage_map.get((eq_type, mto_item.p1_bore_in), 0)
 
-                spool_used = spool_used_query.scalar()
+                total_used = (direct_used or 0) + spool_used
+                remaining = max(0, (total_required or 0) - total_used)
 
-                total_used = (direct_used or 0) + (spool_used or 0)
-                remaining = max(0, total_required - total_used)
+                # اطلاعات را برای آپدیت گروهی (bulk update) آماده می‌کنیم.
+                progress_updates.append({
+                    'mto_item_id': mto_item.id,
+                    'project_id': project_id,
+                    'line_no': line_no,
+                    'item_code': mto_item.item_code,
+                    'description': mto_item.description,
+                    'unit': mto_item.unit,
+                    'total_qty': round(total_required or 0, 2),
+                    'used_qty': round(total_used, 2),
+                    'remaining_qty': round(remaining, 2),
+                    'last_updated': datetime.now()
+                })
 
-                progress = session.query(MTOProgress).filter(
-                    MTOProgress.mto_item_id == mto_item.id
-                ).first()
+            # گام ۵: تمام رکوردهای قدیمی پیشرفت را حذف کرده و رکوردهای جدید را یک‌جا درج می‌کنیم.
+            session.query(MTOProgress).filter(
+                MTOProgress.mto_item_id.in_(mto_item_ids_in_line)
+            ).delete(synchronize_session=False)
 
-                if not progress:
-                    progress = MTOProgress(
-                        mto_item_id=mto_item.id, project_id=project_id, line_no=line_no,
-                        item_code=mto_item.item_code, description=mto_item.description,
-                        unit=mto_item.unit
-                    )
-                    session.add(progress)
-
-                # --- CHANGE: گرد کردن مقادیر قبل از ذخیره ---
-                progress.total_qty = round(total_required, 2)
-                progress.used_qty = round(total_used, 2)
-                progress.remaining_qty = round(remaining, 2)
-                progress.last_updated = datetime.now()
+            if progress_updates:
+                session.bulk_insert_mappings(MTOProgress, progress_updates)
 
             session.commit()
         except Exception as e:
             session.rollback()
             import traceback
-            logging.error(f"خطا در rebuild_mto_progress_for_line: {e}\n{traceback.format_exc()}")
+            logging.error(f"خطا در rebuild_mto_progress_for_line (بهینه شده): {e}\n{traceback.format_exc()}")
         finally:
             session.close()
 
@@ -2088,87 +2129,251 @@ class DataManager:
     # --------------------------------------------------------------------
 
     def _normalize_line_key(self, text: str) -> str:
-        # # نرمال‌سازی: حذف علائم/فاصله/نقل‌قول و یکسان‌سازی حروف
-        import re  # # ایمپورت محلی برای پرهیز از تغییر ابتدای فایل
-        if not text:
-            return ""
-        t = text.upper()  # # بزرگ‌کردن برای بی‌توجهی به کیس
-        t = re.sub(r'[^A-Z0-9]+', '', t)  # # حذف هرچیز جز حروف/اعداد
-        return t  # # رشته‌ی نرمال‌شده
+        """(بدون تغییر) کلید نرمال‌شده برای جستجو را تولید می‌کند."""
+        if not text: return ""
+        return re.sub(r'[^A-Z0-9]+', '', text.upper())
 
     def _extract_prefix_key(self, text: str) -> str:
-        # # استخراج هسته: «تا پایان اولین دنباله 6 رقمی» از رشته نرمال‌شده (طبق نیاز شما)
-        import re  # # ایمپورت محلی
-        norm = self._normalize_line_key(text)  # # نرمال‌سازی ورودی
-        m = re.search(r'(\d{6})', norm)  # # یافتن اولین 6 رقم
-        if not m:
-            return norm  # # اگر نبود، کل نرمال را برگردان
-        end = m.end(1)  # # انتهای 6 رقم
-        return norm[:end]  # # برش از ابتدا تا انتهای 6 رقم
+        """(بدون تغییر) کلید پیشوند (تا اولین ۶ رقم) را برای جستجو استخراج می‌کند."""
+        norm = self._normalize_line_key(text)
+        m = re.search(r'(\d{6})', norm)
+        return norm[:m.end(1)] if m else norm
 
-    def find_iso_files(self, line_text: str, base_dir: str = r"Y:\Piping\ISO", limit: int = 200,
-                       force_refresh: bool = False) -> list[str]:
-        import os, time, json, hashlib
-
-        # مسیر فایل کش روی دیسک
-        cache_file = os.path.join(os.path.dirname(__file__), "iso_index_cache.json")
-
-        # اگر کش حافظه نداریم → از فایل بخونیم
-        if not hasattr(self, "_iso_index"):
-            if os.path.exists(cache_file):
-                try:
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    self._iso_index = [(k, v) for k, v in data.get("index", [])]
-                    self._iso_index_built_at = data.get("built_at", 0.0)
-                    self._iso_index_dir = data.get("base_dir", base_dir)
-                except Exception:
-                    self._iso_index = None
-                    self._iso_index_built_at = 0
-                    self._iso_index_dir = None
-            else:
-                self._iso_index = None
-                self._iso_index_built_at = 0
-                self._iso_index_dir = None
-
-        ttl = 15 * 60
-        expired = (time.time() - (self._iso_index_built_at or 0)) > ttl
-        if force_refresh or (self._iso_index is None) or (self._iso_index_dir != base_dir) or expired:
-            idx = []
-            for root, _, files in os.walk(base_dir):
-                for fn in files:
-                    low = fn.lower()
-                    if low.endswith(".pdf") or low.endswith(".dwg"):
-                        key = self._normalize_line_key(fn)
-                        idx.append((key, os.path.join(root, fn)))
-            self._iso_index = idx
-            self._iso_index_built_at = time.time()
-            self._iso_index_dir = base_dir
-
-            # ذخیره روی دیسک
-            try:
-                with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "index": self._iso_index,
-                        "built_at": self._iso_index_built_at,
-                        "base_dir": self._iso_index_dir
-                    }, f, ensure_ascii=False)
-            except Exception:
-                pass
-
-        prefix = self._extract_prefix_key(line_text)
-        norm_input = self._normalize_line_key(line_text)
-
-        res = [path for key, path in self._iso_index if key.startswith(prefix)]
-        if not res:
-            res = [path for key, path in self._iso_index if norm_input in key]
-
-        # لاگ کردن سرچ‌های موفق در فایل
-        log_file = os.path.join(os.path.dirname(__file__), "iso_search_log.txt")
+    def find_iso_files(self, line_text: str, limit: int = 200) -> list[str]:
+        """
+        (نسخه هوشمند با مقایسه شباهت)
+        ابتدا با یک کوئری سریع کاندیداها را پیدا کرده، سپس آن‌ها را بر اساس بیشترین شباهت
+        به ورودی کاربر مرتب می‌کند تا بهترین نتایج در ابتدا نمایش داده شوند.
+        """
+        from models import IsoFileIndex
+        session = self.get_session()
         try:
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {line_text} | {len(res)} result(s)\n")
-        except Exception:
-            pass
+            norm_input = self._normalize_line_key(line_text)
+            if not norm_input:
+                return []
 
-        return res[: max(1, int(limit))]
+            # مرحله ۱: واکشی کاندیداها از دیتابیس با یک کوئری منعطف‌تر
+            # ما به جای prefix، از خود norm_input برای جستجوی انعطاف‌پذیرتر استفاده می‌کنیم.
+            # این کار نتایج مرتبط بیشتری را در مرحله اول برمی‌گرداند.
+            search_term = f"%{norm_input}%"
+            candidate_records = session.query(
+                IsoFileIndex.file_path,
+                IsoFileIndex.normalized_name
+            ).filter(
+                IsoFileIndex.normalized_name.like(search_term)
+            ).limit(limit * 2).all()  # کمی بیشتر از حد مجاز می‌خوانیم تا فضای کافی برای مرتب‌سازی داشته باشیم
+
+            if not candidate_records:
+                return []
+
+            # مرحله ۲: محاسبه شباهت و مرتب‌سازی در پایتون
+            scored_results = []
+            for file_path, normalized_name in candidate_records:
+                # SequenceMatcher شباهت بین دو رشته را محاسبه می‌کند
+                ratio = difflib.SequenceMatcher(None, norm_input, normalized_name).ratio()
+                # اگر ورودی کاربر در نام فایل وجود داشته باشد، یک امتیاز اضافه می‌دهیم
+                if norm_input in normalized_name:
+                    ratio += 0.1
+
+                scored_results.append((ratio, file_path))
+
+            # مرتب‌سازی نتایج بر اساس امتیاز شباهت (از بیشترین به کمترین)
+            scored_results.sort(key=lambda x: x[0], reverse=True)
+
+            # برگرداندن مسیر فایل‌ها به تعداد limit
+            return [file_path for ratio, file_path in scored_results[:limit]]
+
+        except Exception as e:
+            logging.error(f"خطا در جستجوی هوشمند فایل ISO: {e}")
+            return []
+        finally:
+            session.close()
+
+    def upsert_iso_index_entry(self, file_path: str):
+        """یک فایل را در جدول ایندکس درج یا به‌روزرسانی می‌کند (UPSERT)."""
+        session = self.get_session()
+        try:
+            if not os.path.exists(file_path):
+                self.remove_iso_index_entry(file_path)
+                return
+
+            filename = os.path.basename(file_path)
+            normalized_name = self._normalize_line_key(filename)
+            prefix_key = self._extract_prefix_key(filename)
+            last_modified = datetime.fromtimestamp(os.path.getmtime(file_path))
+
+            # ابتدا سعی کن رکورد موجود را پیدا کنی
+            record = session.query(IsoFileIndex).filter(IsoFileIndex.file_path == file_path).first()
+            if record:
+                # اگر وجود داشت، آپدیت کن
+                record.normalized_name = normalized_name
+                record.prefix_key = prefix_key
+                record.last_modified = last_modified
+            else:
+                # اگر وجود نداشت، یکی جدید بساز
+                record = IsoFileIndex(
+                    file_path=file_path,
+                    normalized_name=normalized_name,
+                    prefix_key=prefix_key,
+                    last_modified=last_modified
+                )
+                session.add(record)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logging.error(f"خطا در upsert_iso_index_entry برای فایل {file_path}: {e}")
+        finally:
+            session.close()
+
+    def remove_iso_index_entry(self, file_path: str):
+        """یک فایل را از جدول ایندکس حذف می‌کند."""
+        session = self.get_session()
+        try:
+            session.query(IsoFileIndex).filter(IsoFileIndex.file_path == file_path).delete()
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logging.error(f"خطا در remove_iso_index_entry برای فایل {file_path}: {e}")
+        finally:
+            session.close()
+
+    def rebuild_iso_index_from_scratch(self, base_dir: str, event_handler=None):
+        """
+        (نسخه نهایی و هوشمند)
+        ایندکس فایل‌های ISO را به صورت غیرمخرب و هوشمند بازسازی می‌کند.
+        - ایندکس قدیمی را حذف نمی‌کند، بلکه تغییرات را اعمال می‌کند.
+        - وضعیت پیشرفت را از طریق سیگنال گزارش می‌دهد.
+        """
+        session = self.get_session()
+
+        def emit_status(message, level):
+            if event_handler and hasattr(event_handler, 'status_updated'):
+                event_handler.status_updated.emit(message, level)
+            else:
+                logging.info(f"[{level.upper()}] {message}")
+
+        def emit_progress(value):
+            if event_handler and hasattr(event_handler, 'progress_updated'):
+                event_handler.progress_updated.emit(value)
+
+        try:
+            emit_status("شروع اسکن فایل‌ها...", "info")
+            emit_progress(0)
+
+            # گام ۱: تمام فایل‌های PDF و DWG را از روی دیسک پیدا کن
+            disk_files_paths = glob.glob(os.path.join(base_dir, "**", "*.pdf"), recursive=True)
+            disk_files_paths.extend(glob.glob(os.path.join(base_dir, "**", "*.dwg"), recursive=True))
+
+            if not disk_files_paths:
+                emit_status("هیچ فایلی یافت نشد. ایندکس پاک شد.", "warning")
+                with session.begin():
+                    session.query(IsoFileIndex).delete()
+                emit_progress(100)
+                return
+
+            # ساخت یک دیکشنری از فایل‌های روی دیسک برای جستجوی سریع
+            disk_files_map = {}
+            for path in disk_files_paths:
+                try:
+                    disk_files_map[path] = datetime.fromtimestamp(os.path.getmtime(path))
+                except (FileNotFoundError, OSError):
+                    continue  # فایل‌هایی که در لحظه اسکن حذف می‌شوند را نادیده بگیر
+
+            emit_status("مقایسه با ایندکس موجود...", "info")
+
+            # گام ۲: تمام ایندکس موجود در دیتابیس را بخوان
+            db_files_map = {record.file_path: record.last_modified for record in session.query(IsoFileIndex).all()}
+
+            # گام ۳: تغییرات را محاسبه کن
+            db_paths = set(db_files_map.keys())
+            disk_paths = set(disk_files_map.keys())
+
+            paths_to_add = disk_paths - db_paths
+            paths_to_delete = db_paths - disk_paths
+            paths_to_check = db_paths.intersection(disk_paths)
+
+            records_to_add = []
+            records_to_update = []
+
+            total_ops = len(paths_to_add) + len(paths_to_delete) + len(paths_to_check)
+            completed_ops = 0
+            last_progress = -1
+
+            # آماده‌سازی رکوردهای جدید
+            for path in paths_to_add:
+                records_to_add.append({
+                    "file_path": path,
+                    "normalized_name": self._normalize_line_key(os.path.basename(path)),
+                    "prefix_key": self._extract_prefix_key(os.path.basename(path)),
+                    "last_modified": disk_files_map[path]
+                })
+                completed_ops += 1
+
+            # شناسایی رکوردهای آپدیتی
+            for path in paths_to_check:
+                if disk_files_map[path] != db_files_map[path]:
+                    records_to_update.append({
+                        "file_path": path,
+                        "last_modified": disk_files_map[path]
+                    })
+                completed_ops += 1
+                # --- گزارش پیشرفت در حین عملیات ---
+                progress = int((completed_ops / total_ops) * 100)
+                if progress > last_progress:
+                    emit_progress(progress)
+                    last_progress = progress
+
+            # گام ۴: اعمال تغییرات در دیتابیس
+            emit_status("اعمال تغییرات در دیتابیس...", "info")
+            with session.begin():
+                # حذف گروهی
+                if paths_to_delete:
+                    session.query(IsoFileIndex).filter(IsoFileIndex.file_path.in_(paths_to_delete)).delete(
+                        synchronize_session=False)
+
+                # افزودن گروهی
+                if records_to_add:
+                    session.bulk_insert_mappings(IsoFileIndex, records_to_add)
+
+                # آپدیت (این بخش باید یکی یکی انجام شود ولی همچنان سریع است)
+                for record_data in records_to_update:
+                    session.query(IsoFileIndex).filter(IsoFileIndex.file_path == record_data['file_path']).update(
+                        {"last_modified": record_data['last_modified']})
+
+            emit_status(
+                f"ایندکس با موفقیت همگام‌سازی شد. ({len(records_to_add)} جدید, {len(paths_to_delete)} حذف, {len(records_to_update)} آپدیت)",
+                "success")
+            emit_progress(100)
+
+        except Exception as e:
+            emit_status(f"خطای بحرانی در بازسازی ایندکس: {e}", "error")
+            session.rollback()
+        finally:
+            session.close()
+
+    def upsert_iso_index_entry(self, file_path):
+        session = self.get_session()
+        try:
+            norm_name = os.path.splitext(os.path.basename(file_path))[0].upper()
+            entry = session.query(IsoFileIndex).filter_by(file_path=file_path).first()
+            if entry:
+                entry.last_modified = datetime.now()
+            else:
+                entry = IsoFileIndex(
+                    file_path=file_path,
+                    normalized_name=norm_name,
+                    prefix_key=norm_name.split('-')[0] if '-' in norm_name else norm_name,
+                    last_modified=datetime.now()
+                )
+                session.add(entry)
+            session.commit()
+        finally:
+            session.close()
+
+    def remove_iso_index_entry(self, file_path):
+        session = self.get_session()
+        try:
+            session.query(IsoFileIndex).filter_by(file_path=file_path).delete()
+            session.commit()
+        finally:
+            session.close()
