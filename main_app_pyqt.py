@@ -9,10 +9,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QComboBox, QPushButton, QTextEdit, QFrame, QMessageBox, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QSplitter,
-    QCompleter, QInputDialog, QFileDialog, QGroupBox, QProgressBar
+    QCompleter, QInputDialog, QFileDialog, QGroupBox, QProgressBar, QSplashScreen
 )
 
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont, QColor, QPixmap, QMovie
 from PyQt6.QtCore import Qt, QStringListModel, pyqtSignal, QObject, QTimer
 
 # برای نمایش نمودار در PyQt6
@@ -30,6 +30,51 @@ import time
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from config_manager import DB_PATH, DASHBOARD_PASSWORD, ISO_PATH
+
+
+class SplashScreen(QSplashScreen):
+    def __init__(self):
+        logo_path = os.path.join(os.path.dirname(__file__), 'splash_logo.gif')
+
+        # پس‌زمینه اولیه
+        splash_pix = QPixmap(logo_path) if os.path.exists(logo_path) else QPixmap()
+        super().__init__(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
+
+        # لایه اصلی
+        layout = QVBoxLayout(self)
+
+        # QLabel برای نمایش GIF
+        self.gif_label = QLabel(self)
+        self.gif_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.gif_label)
+
+        # QLabel برای نمایش پیام
+        self.message_label = QLabel(self)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter)
+        self.message_label.setStyleSheet("color: white; font-size: 16px; margin-bottom: 20px;")
+        layout.addWidget(self.message_label)
+
+        # اگر GIF وجود دارد → روی QLabel بگذاریم
+        if os.path.exists(logo_path):
+            self.movie = QMovie(logo_path)
+            if self.movie.isValid():
+                self.gif_label.setMovie(self.movie)
+                self.movie.start()
+
+        # اگر تصویر پیدا نشد → پس‌زمینه خالی بده
+        if splash_pix.isNull():
+            self.setStyleSheet("background-color: #333;")
+
+        # پیام اولیه
+        self.showMessage("در حال بارگذاری...", QColor(Qt.GlobalColor.white))
+
+        self.show()
+
+    def showMessage(self, message, color):
+        """متد سفارشی برای نمایش پیام با رنگ مشخص."""
+        self.message_label.setText(message)
+        self.message_label.setStyleSheet(f"color: {color.name()}; font-size: 16px; margin-bottom: 20px;")
+
 
 class IsoIndexEventHandler(QObject, FileSystemEventHandler):  # 👈 **ORDER SWAPPED HERE**
     """
@@ -1520,10 +1565,21 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
 
+    # 1. ساخت و نمایش پنجره اسپلش
+    splash = SplashScreen()
+    app.processEvents()  # برای رندر سریع اسپلش
 
+    def start_main_window():
+        splash.close()
+        window = MainWindow()
+        window.show()
+        app.window = window  # جلوگیری از GC
+
+    # 2. بعد از ۳ ثانیه اسپلش بسته شود و MainWindow بیاید
+    QTimer.singleShot(3000, start_main_window)
+
+    # 3. مدیریت خطاهای پیش‌بینی‌نشده
     def excepthook(exc_type, exc_value, exc_tb):
         error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         print("Unhandled exception:", error_msg)
@@ -1532,13 +1588,12 @@ if __name__ == "__main__":
         box.setIcon(QMessageBox.Icon.Critical)
         box.setWindowTitle("Unhandled Exception")
         box.setText("خطای غیرمنتظره رخ داد")
-        box.setDetailedText(error_msg)  # ✨ متن کامل استک‌ترِیس
+        box.setDetailedText(error_msg)
         box.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse |
             Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
         box.exec()
-
 
     sys.excepthook = excepthook
     sys.exit(app.exec())
