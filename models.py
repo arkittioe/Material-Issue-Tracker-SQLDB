@@ -1,6 +1,6 @@
 # file: models.py
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 
@@ -37,6 +37,10 @@ class MIVRecord(Base):
 
     project = relationship("Project", back_populates="miv_records")
 
+    # <<< ADDED: ایندکس ترکیبی برای جستجوهای متداول
+    __table_args__ = (
+        Index('ix_miv_records_project_line', 'project_id', 'line_no'),
+    )
 
 # -------------------------
 # جدول MTO Items
@@ -62,7 +66,10 @@ class MTOItem(Base):
 
     project = relationship("Project", back_populates="mto_items")
 
-
+    # <<< ADDED: ایندکس ترکیبی برای جستجوهای متداول
+    __table_args__ = (
+        Index('ix_mto_items_project_line', 'project_id', 'line_no'),
+    )
 # -------------------------
 # جدول MTO Progress
 # -------------------------

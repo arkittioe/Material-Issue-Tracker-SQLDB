@@ -153,6 +153,7 @@ class SpoolManagerDialog(QDialog):
 
     def populate_table(self, items: list[SpoolItem]):
         """جدول را با آیتم‌های یک اسپول پر می‌کند."""
+        self.table.setRowCount(0)  # <<< ADDED: پاک کردن جدول قبل از پر کردن
         self.table.setRowCount(len(items))
         for row, item in enumerate(items):
             def to_str(val):
@@ -376,6 +377,7 @@ class SpoolSelectionDialog(QDialog):
 
     def populate_table(self):
         self.spin_boxes_info = []
+        self.table.setRowCount(0)  # <<< ADDED: پاک کردن جدول قبل از پر کردن
         self.table.setRowCount(len(self.items))
 
         for row, item in enumerate(self.items):
@@ -1259,19 +1261,23 @@ class MainWindow(QMainWindow):
             return
 
         self.log_to_console(f"شروع فرآیند به‌روزرسانی برای {len(file_paths)} فایل انتخابی...", "info")
-        QApplication.processEvents()  # برای نمایش پیام قبل از شروع عملیات سنگین
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.log_to_console(f"شروع فرآیند به‌روزرسانی برای {len(file_paths)} فایل انتخابی...", "info")
+            QApplication.processEvents()
 
-        # --- CHANGE: فراخوانی تابع جدید و هوشمند در DataManager ---
-        success, message = self.dm.process_selected_csv_files(file_paths)
+            success, message = self.dm.process_selected_csv_files(file_paths)
 
-        # ۵. نمایش نتیجه نهایی (بدون تغییر)
-        if success:
-            self.log_to_console(message, "success")
-            self.show_message("موفق", message)
-            self.populate_project_combo()  # لیست پروژه‌ها را برای نمایش تغییرات احتمالی، بازخوانی می‌کنیم
-        else:
-            self.log_to_console(message, "error")
-            self.show_message("خطا", message, "error")
+            if success:
+                self.log_to_console(message, "success")
+                self.show_message("موفق", message)
+                self.populate_project_combo()
+            else:
+                self.log_to_console(message, "error")
+                self.show_message("خطا", message, "error")
+        finally:
+            # <<< ADDED: بازگرداندن نشانگر ماوس به حالت عادی در هر صورت
+            QApplication.restoreOverrideCursor()
 
     def handle_iso_search(self):
         raw_line = (self.entries.get("Line No").text() if self.entries.get("Line No") else "").strip()
