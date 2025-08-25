@@ -33,6 +33,7 @@ from config_manager import DB_PATH, DASHBOARD_PASSWORD, ISO_PATH
 
 
 class SplashScreen(QSplashScreen):
+
     def __init__(self):
         logo_path = os.path.join(os.path.dirname(__file__), 'splash_logo.gif')
 
@@ -66,7 +67,7 @@ class SplashScreen(QSplashScreen):
             self.setStyleSheet("background-color: #333;")
 
         # پیام اولیه
-        self.showMessage("در حال بارگذاری...", QColor(Qt.GlobalColor.white))
+        self.showMessage("h.izadi", QColor(Qt.GlobalColor.white))
 
         self.show()
 
@@ -97,22 +98,22 @@ class IsoIndexEventHandler(QObject, FileSystemEventHandler):  # 👈 **ORDER SWA
 
     def on_created(self, event):
         if not event.is_directory and self._is_supported(event.src_path):
-            print(f"File created: {event.src_path}")
+            self.status_updated.emit(f"فایل جدید شناسایی شد: {os.path.basename(event.src_path)}", "info")
             self.dm.upsert_iso_index_entry(event.src_path)
 
     def on_deleted(self, event):
         if not event.is_directory and self._is_supported(event.src_path):
-            print(f"File deleted: {event.src_path}")
+            self.status_updated.emit(f"فایل حذف شد: {os.path.basename(event.src_path)}", "warning")
             self.dm.remove_iso_index_entry(event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory and self._is_supported(event.src_path):
-            print(f"File modified: {event.src_path}")
+            self.status_updated.emit(f"فایل ویرایش شد: {os.path.basename(event.src_path)}", "info")
             self.dm.upsert_iso_index_entry(event.src_path)
 
     def on_moved(self, event):
         if not event.is_directory and self._is_supported(event.src_path):
-            print(f"File moved: from {event.src_path} to {event.dest_path}")
+            self.status_updated.emit(f"فایل منتقل شد: {os.path.basename(event.src_path)} -> {os.path.basename(event.dest_path)}", "info")
             self.dm.remove_iso_index_entry(event.src_path)
             if self._is_supported(event.dest_path):
                 self.dm.upsert_iso_index_entry(event.dest_path)
@@ -194,7 +195,7 @@ class SpoolManagerDialog(QDialog):
             completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
             self.spool_id_entry.setCompleter(completer)
         except Exception as e:
-            print(f"Failed to setup completer: {e}")
+            self.log_to_console(f"Failed to setup completer: {e}", "error")
 
     def populate_table(self, items: list[SpoolItem]):
         """جدول را با آیتم‌های یک اسپول پر می‌کند."""
@@ -575,7 +576,22 @@ class MTOConsumptionDialog(QDialog):
         self.table.resizeColumnsToContents()
         layout.addWidget(self.table)
 
+        optimize_spool_btn = QPushButton("⚙️ محاسبه بهینه اسپول (تست)")
+        optimize_spool_btn.clicked.connect(self.handle_spool_optimization)
+
+        # یک چیدمان موقت برای دکمه
+        extra_btns_layout = QHBoxLayout()
+        extra_btns_layout.addWidget(optimize_spool_btn)
+        extra_btns_layout.addStretch()
+        layout.addLayout(extra_btns_layout)
+
         self.populate_table()
+
+        # ️ -------------اتصال سیگنال تغییر مقدار به تابع جدید------------
+        for row in range(self.table.rowCount()):
+            spin_box = self.table.cellWidget(row, 8)
+            if spin_box:
+                spin_box.valueChanged.connect(self.update_recommendations)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept_data)
@@ -708,6 +724,42 @@ class MTOConsumptionDialog(QDialog):
         if spin_box.value() > new_max:
             spin_box.setValue(max(0, new_max))
 
+    def update_recommendations(self):
+        """بر اساس آیتم‌های انتخاب شده، پیشنهادها را آپدیت می‌کند."""
+        selected_item_codes = []
+        for row in range(self.table.rowCount()):
+            spin_box = self.table.cellWidget(row, 8)
+            if spin_box and spin_box.value() > 0:
+                item_code = self.table.item(row, 0).text()
+                if item_code:
+                    selected_item_codes.append(item_code)
+
+        if not selected_item_codes:
+            for row in range(self.table.rowCount()):
+                for col in range(self.table.columnCount()):
+                    # آیتم‌های جدول ممکن است None باشند
+                    item = self.table.item(row, col)
+                    if item:
+                        item.setBackground(QColor("white"))
+            return
+
+        # **تغییر اصلی:** ارسال project_id برای گرفتن پیشنهادهای مرتبط‌تر
+        recs = self.dm.get_recommendations(selected_item_codes, self.project_id)
+
+        for row in range(self.table.rowCount()):
+            item_code = self.table.item(row, 0).text()
+            is_recommended = item_code in recs
+            spin_box = self.table.cellWidget(row, 8)
+
+            background_color = QColor("white")  # رنگ پیش‌فرض
+            if is_recommended and spin_box and spin_box.value() == 0:
+                background_color = QColor("#d1e7dd")  # سبز روشن
+
+            for col in range(self.table.columnCount()):
+                item = self.table.item(row, col)
+                if item:
+                    item.setBackground(background_color)
+
     def accept_data(self):
         self.consumed_data = []
         self.spool_consumption_data = []
@@ -738,6 +790,40 @@ class MTOConsumptionDialog(QDialog):
     def get_data(self):
         return self.consumed_data, self.spool_consumption_data
 
+    def handle_spool_optimization(self):
+        """--- NEW: تابع جدید برای فراخوانی و نمایش نتایج بهینه‌ساز اسپول ---"""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            success, message, plan = self.dm.get_optimized_spool_suggestion(
+                self.project_id,
+                self.line_no
+            )
+
+            QApplication.restoreOverrideCursor()
+
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("نتیجه بهینه‌سازی مصرف اسپول")
+            msg_box.setText(message)
+
+            if success:
+                msg_box.setIcon(QMessageBox.Icon.Information)
+                # اگر می‌خواهید جزئیات پیشنهاد را نمایش دهید:
+                if plan:
+                    detailed_text = ""
+                    for item_plan in plan.get("items", []):
+                        detailed_text += f"برای آیتم '{item_plan['mto_desc']}':\n"
+                        for sel in item_plan["selections"]:
+                            detailed_text += f"  - از اسپول {sel['spool_id']} به مقدار {sel['used_qty']:.2f} متر بردارید.\n"
+                    msg_box.setDetailedText(detailed_text)
+            else:
+                msg_box.setIcon(QMessageBox.Icon.Warning)
+
+            msg_box.exec()
+
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "خطای بحرانی", f"خطا در اجرای بهینه‌ساز: {e}")
+
 # --- پنجره اصلی برنامه ---
 class MainWindow(QMainWindow):
 
@@ -746,11 +832,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("مدیریت MIV - نسخه 1.0")
         self.setGeometry(100, 100, 1200, 800)
 
-        self.dm = DataManager(db_path=DB_PATH)
+        # --- FIX: setup_ui() MUST be called BEFORE DataManager is initialized ---
+        # This ensures that self.console_output and other widgets exist.
+        self.setup_ui()
+
+        # Now that the UI is created, we can safely initialize DataManager
+        self.dm = DataManager(db_path=DB_PATH, logger_callback=self.log_to_console)
+
         self.current_project: Project | None = None
         self.current_user = os.getlogin()
         self.suggestion_data = []
-        self.dashboard_password = "hossein"#DASHBOARD_PASSWORD
+        self.dashboard_password = "hossein" #DASHBOARD_PASSWORD
 
         # <<< CHANGE: تایمر برای Debouncing اضافه شد
         self.suggestion_timer = QTimer(self)
@@ -761,9 +853,12 @@ class MainWindow(QMainWindow):
 
         # تعریف یک سیگنال در کلاس اصلی برای دریافت پیام از ترد نگهبان
         self.iso_event_handler = IsoIndexEventHandler(self.dm)
+
         # --- NEW: راه‌اندازی منوی بالای پنجره ---
+        # setup_menu() can be called after setup_ui()
         self.setup_menu()
-        self.setup_ui()
+
+        # Connect signals and populate data after all objects are created
         self.connect_signals()
         self.populate_project_combo()
         QApplication.instance().aboutToQuit.connect(self.cleanup_processes)
@@ -1016,8 +1111,28 @@ class MainWindow(QMainWindow):
 
         if self.current_project:
             self.log_to_console(f"پروژه '{self.current_project.name}' با موفقیت بارگذاری شد.", "success")
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                # نمایش پیش‌بینی کسری با مدل Prophet
+                shortages = self.dm.get_predicted_shortages(self.current_project.id)
+                if shortages:
+                    self.log_to_console("--- 🔮 پیش‌بینی کسری متریال (با مدل Prophet) ---", "warning")
+                    for s in shortages[:5]:
+                        msg = f"'{s['Item Code']}' (باقیمانده: {s['Remaining Qty']}) - تاریخ اتمام: {s['Predicted Shortage Date']}"
+                        self.log_to_console(msg, "warning")
+                else:
+                    self.log_to_console("هیچ آیتمی در معرض خطر کسری فوری شناسایی نشد.", "info")
+
+                # نمایش هشدارهای ناهنجاری
+                anomalies = self.dm.get_activity_logs(limit=10, action_filter="ANOMALY_DETECTED")
+                if anomalies:
+                    self.log_to_console("--- ❗️ آخرین ناهنجاری‌های شناسایی شده ---", "error")
+                    for a in anomalies:
+                        self.log_to_console(a.details, "error")
+
+            finally:
+                QApplication.restoreOverrideCursor()
         else:
-            # اگر "همه پروژه‌ها" انتخاب شود
             self.log_to_console("حالت جستجوی سراسری فعال است. یک خط را جستجو کنید.", "info")
 
     def fetch_suggestions(self):
@@ -1519,10 +1634,10 @@ class MainWindow(QMainWindow):
             if self.iso_observer:
                 self.iso_observer.stop()
                 self.iso_observer.join() # منتظر می‌مانیم تا ترد کاملا بسته شود
-                print("ISO watcher stopped.")
+                self.log_to_console("ISO watcher stopped.", "info")
 
         except Exception as e:
-            print(f"⚠️ خطا در بستن پروسه‌ها: {e}")
+            self.log_to_console(f"⚠️ خطا در بستن پروسه‌ها: {e}", "error")
 
     def update_iso_status_label(self, message, level):
         color_map = {"info": "#8be9fd", "success": "#50fa7b", "warning": "#f1fa8c", "error": "#ff5555"}
@@ -1563,6 +1678,7 @@ class MainWindow(QMainWindow):
             self.iso_progress_bar.hide()
             self.iso_progress_bar.setValue(0)
 
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
@@ -1582,7 +1698,8 @@ if __name__ == "__main__":
     # 3. مدیریت خطاهای پیش‌بینی‌نشده
     def excepthook(exc_type, exc_value, exc_tb):
         error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        print("Unhandled exception:", error_msg)
+        # The print statement below is removed as it prints to the external console.
+        # print("Unhandled exception:", error_msg)
 
         box = QMessageBox()
         box.setIcon(QMessageBox.Icon.Critical)

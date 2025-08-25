@@ -18,6 +18,7 @@ import glob
 from sqlalchemy.engine import Engine
 import time
 from config_manager import DB_PATH, DASHBOARD_PASSWORD, ISO_PATH
+from ai_engine import Recommender, ShortagePredictor, AnomalyDetector # برای یادگیری ماشین
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -42,19 +43,48 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor.close()
 
 class DataManager:
-    def __init__(self, db_path= DB_PATH):
+    def __init__(self, db_path=DB_PATH, logger_callback=None):
         """
-        (بهینه‌سازی شده برای شبکه)
         کلاس مدیریت تمام تعاملات با پایگاه داده.
         """
-        # ساخت اتصال به دیتابیس SQLite با تنظیمات مناسب برای کار روی شبکه
+        # --- NEW: دریافت و تنظیم لاگر ---
+        self.logger = logger_callback if logger_callback else print
+
         self.engine = create_engine(
             f"sqlite:///{db_path}",
             echo=False,
-            connect_args={'timeout': 15}  # افزایش زمان انتظار برای آزاد شدن قفل به ۱۵ ثانیه
+            connect_args={'timeout': 15}
         )
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
+
+        # --- بارگذاری یا آموزش مدل‌های هوش مصنوعی (با استفاده از لاگر جدید) ---
+        self.recommender = Recommender()
+        self.shortage_predictor = ShortagePredictor()
+        self.anomaly_detector = AnomalyDetector()
+
+        # اگر مدل‌ها از قبل آموزش ندیده باشند، آن‌ها را آموزش بده
+        if not self.recommender.rules:
+            self.logger("در حال آموزش مدل پیشنهادگر...", "info")
+            transactions = self.get_all_transactions_for_training(group_by_project=True)
+            self.recommender.train(transactions, logger=self.logger)
+        else:
+            self.recommender.load_model(logger=self.logger)
+
+        if not self.shortage_predictor.models:
+            self.logger("در حال آموزش مدل پیش‌بینی کسری (Prophet)...", "info")
+            consumption_df = self.get_consumption_history_df()
+            self.shortage_predictor.train(consumption_df, logger=self.logger)
+        else:
+            self.shortage_predictor.load_model(logger=self.logger)
+
+        if self.anomaly_detector.model is None:
+            self.logger("در حال آموزش مدل شناسایی ناهنجاری...", "info")
+            miv_df = self.get_all_mivs_for_training()
+            self.anomaly_detector.train(miv_df, logger=self.logger)
+        else:
+            self.anomaly_detector.load_model(logger=self.logger)
+
     def get_session(self):
         """یک سشن جدید برای ارتباط با دیتابیس ایجاد می‌کند."""
         return self.Session()
@@ -89,9 +119,14 @@ class DataManager:
     # --------------------------------------------------------------------
 
     def register_miv_record(self, project_id, form_data, consumption_items, spool_consumption_items=None):
+        """
+        یک رکورد MIV جدید را ثبت می‌کند، مصرف‌ها را لحاظ کرده، ناهنجاری‌ها را بررسی
+        و در نهایت آمار پیشرفت خط را به‌روزرسانی می‌کند. (نسخه بهینه‌سازی شده)
+        """
         session = self.get_session()
         try:
-            # ... (بخش ساخت MIVRecord) ...
+            # ... (The entire 'try' block remains unchanged) ...
+            # 1. ساخت رکورد اصلی MIV
             new_record = MIVRecord(
                 project_id=project_id,
                 line_no=form_data['Line No'],
@@ -105,53 +140,87 @@ class DataManager:
                 is_complete=form_data.get('Complete', False)
             )
             session.add(new_record)
-            session.flush()
+            session.flush()  # برای اینکه new_record.id در دسترس قرار گیرد
 
-            for item in consumption_items:
-                session.add(MTOConsumption(
-                    mto_item_id=item['mto_item_id'],
-                    miv_record_id=new_record.id,
-                    used_qty=item['used_qty'],  # از UI گرد شده می‌آید
-                    timestamp=datetime.now()
-                ))
+            # 2. بهینه‌سازی: دریافت اطلاعات تمام آیتم‌های مصرفی با یک کوئری
+            if consumption_items:
+                mto_item_ids = [item['mto_item_id'] for item in consumption_items]
 
+                # یک دیکشنری از اطلاعات مورد نیاز (total_qty) برای بررسی ناهنجاری می‌سازیم
+                mto_info_query = session.query(MTOProgress.mto_item_id, MTOProgress.total_qty) \
+                    .filter(MTOProgress.mto_item_id.in_(mto_item_ids))
+
+                mto_info_map = {item_id: total_qty for item_id, total_qty in mto_info_query.all()}
+
+                # 3. ثبت مصرف مستقیم (MTO) و بررسی ناهنجاری
+                for item in consumption_items:
+                    total_qty_for_item = mto_info_map.get(item['mto_item_id'])
+
+                    # بررسی ناهنجاری با استفاده از داده‌های آماده
+                    if total_qty_for_item is not None:
+                        data_point = {
+                            'used_qty': item['used_qty'],
+                            'total_qty': total_qty_for_item,
+                            'timestamp': new_record.last_updated  # استفاده از زمان یکسان برای تمام رکوردها
+                        }
+                        self.check_for_anomaly(data_point)
+
+                    # ثبت رکورد مصرف در جدول MTOConsumption
+                    session.add(MTOConsumption(
+                        mto_item_id=item['mto_item_id'],
+                        miv_record_id=new_record.id,
+                        used_qty=item['used_qty'],
+                        timestamp=new_record.last_updated
+                    ))
+
+            # 4. ثبت مصرف از انبار اسپول (Spool)
             if spool_consumption_items:
                 spool_notes = []
                 for consumption in spool_consumption_items:
-                    # ... (بخش کم کردن از موجودی اسپول بدون تغییر) ...
                     spool_item = session.get(SpoolItem, consumption['spool_item_id'])
                     used_qty = consumption['used_qty']
-                    if not spool_item: raise ValueError(f"Spool item ID {consumption['spool_item_id']} not found.")
+
+                    if not spool_item:
+                        raise ValueError(f"آیتم اسپول با شناسه {consumption['spool_item_id']} یافت نشد.")
+
                     is_pipe = "PIPE" in (spool_item.component_type or "").upper()
                     if is_pipe:
-                        if (spool_item.length or 0) < used_qty: raise ValueError(
-                            f"Insufficient length for pipe in spool {spool_item.spool.spool_id}.")
+                        if (spool_item.length or 0) < used_qty:
+                            raise ValueError(f"طول کافی برای پایپ در اسپول {spool_item.spool.spool_id} وجود ندارد.")
                         spool_item.length -= used_qty
                     else:
-                        if (spool_item.qty_available or 0) < used_qty: raise ValueError(
-                            f"Insufficient qty for {spool_item.component_type} in spool {spool_item.spool.spool_id}.")
+                        if (spool_item.qty_available or 0) < used_qty:
+                            raise ValueError(
+                                f"تعداد کافی برای {spool_item.component_type} در اسپول {spool_item.spool.spool_id} وجود ندارد.")
                         spool_item.qty_available -= used_qty
 
                     session.add(SpoolConsumption(
                         spool_item_id=spool_item.id,
                         spool_id=spool_item.spool.id,
                         miv_record_id=new_record.id,
-                        used_qty=used_qty,  # از UI گرد شده می‌آید
-                        timestamp=datetime.now()
+                        used_qty=used_qty,
+                        timestamp=new_record.last_updated
                     ))
 
-                    # --- CHANGE: اصلاح واحد در Note ---
                     unit = "m" if is_pipe else "عدد"
                     spool_notes.append(
                         f"{used_qty:.2f} {unit} از {spool_item.component_type} (اسپول: {spool_item.spool.spool_id})")
 
                 if spool_notes:
-                    final_comment = (new_record.comment or "") + " | مصرف اسپول: " + ", ".join(spool_notes)
+                    # به‌روزرسانی کامنت رکورد MIV با اطلاعات مصرف اسپول
+                    final_comment = (new_record.comment or "")
+                    if final_comment:
+                        final_comment += " | "
+                    final_comment += "مصرف اسپول: " + ", ".join(spool_notes)
                     new_record.comment = final_comment
 
+            # 5. نهایی‌سازی و ثبت در دیتابیس
             session.commit()
+
+            # 6. بازسازی آمار پیشرفت برای خط مورد نظر پس از ثبت موفق
             self.rebuild_mto_progress_for_line(project_id, form_data['Line No'])
 
+            # 7. ثبت لاگ فعالیت
             self.log_activity(
                 user=form_data['Registered By'], action="REGISTER_MIV",
                 details=f"MIV Tag '{form_data['MIV Tag']}' for Line '{form_data['Line No']}'",
@@ -161,7 +230,8 @@ class DataManager:
         except Exception as e:
             session.rollback()
             import traceback
-            logging.error(f"خطا در ثبت رکورد: {e}\n{traceback.format_exc()}")
+            # CHANGE: Replaced logging.error with self.logger
+            self.logger(f"خطا در ثبت رکورد: {e}\n{traceback.format_exc()}", "error")
             return False, f"خطا در ثبت رکورد: {e}"
         finally:
             session.close()
@@ -1103,11 +1173,15 @@ class DataManager:
         finally:
             session.close()
 
-    def get_activity_logs(self, limit=100):
+    def get_activity_logs(self, limit=100, action_filter=None):
         """آخرین N رکورد از جدول لاگ فعالیت‌ها را برمی‌گرداند."""
         session = self.get_session()
         try:
-            return session.query(ActivityLog).order_by(ActivityLog.timestamp.desc()).limit(limit).all()
+            query = session.query(ActivityLog)
+            if action_filter:
+                query = query.filter(ActivityLog.action == action_filter)
+
+            return query.order_by(ActivityLog.timestamp.desc()).limit(limit).all()
         except Exception as e:
             logging.error(f"Error fetching activity logs: {e}")
             return []
@@ -2367,3 +2441,194 @@ class DataManager:
             session.commit()
         finally:
             session.close()
+
+    #--------------------------------------------------------------------
+    #  --- متدهای برای واکشی داده‌های آموزشی ---
+    #--------------------------------------------------------------------
+
+    def get_all_transactions_for_training(self, group_by_project=False) -> dict | list:
+        """تمام MIV ها را به صورت تراکنش برای مدل پیشنهادگر برمی‌گرداند."""
+        session = self.get_session()
+        try:
+            query = session.query(
+                MIVRecord.project_id,
+                MTOConsumption.miv_record_id,
+                MTOItem.item_code
+            ).join(MTOItem, MTOConsumption.mto_item_id == MTOItem.id) \
+             .join(MIVRecord, MTOConsumption.miv_record_id == MIVRecord.id).all()
+
+            if not group_by_project:
+                transactions = {}
+                for _, miv_id, item_code in query:
+                    if miv_id not in transactions:
+                        transactions[miv_id] = set()
+                    transactions[miv_id].add(item_code)
+                return {'global': [list(items) for items in transactions.values()]}
+
+            # گروه‌بندی بر اساس پروژه
+            transactions_by_project = {}
+            for project_id, miv_id, item_code in query:
+                if project_id not in transactions_by_project:
+                    transactions_by_project[project_id] = {}
+                if miv_id not in transactions_by_project[project_id]:
+                    transactions_by_project[project_id][miv_id] = set()
+                transactions_by_project[project_id][miv_id].add(item_code)
+
+            # تبدیل به فرمت نهایی
+            final_grouped_transactions = {
+                f'proj_{pid}': [list(items) for items in mivs.values()]
+                for pid, mivs in transactions_by_project.items()
+            }
+            return final_grouped_transactions
+        finally:
+            session.close()
+
+    def get_consumption_history_df(self) -> pd.DataFrame:
+        """تاریخچه مصرف را به صورت DataFrame برای مدل پیش‌بینی کسری برمی‌گرداند."""
+        session = self.get_session()
+        try:
+            query = session.query(
+                MTOItem.item_code,
+                MTOConsumption.timestamp,
+                MTOConsumption.used_qty
+            ).join(MTOItem, MTOConsumption.mto_item_id == MTOItem.id)
+            return pd.read_sql(query.statement, session.bind)
+        finally:
+            session.close()
+
+    def get_all_mivs_for_training(self) -> pd.DataFrame:
+        """داده‌ها را برای آموزش مدل شناسایی ناهنجاری آماده می‌کند."""
+        session = self.get_session()
+        try:
+            query = session.query(
+                MTOConsumption.used_qty,
+                MTOProgress.total_qty,
+                MTOConsumption.timestamp
+            ).join(MTOItem, MTOConsumption.mto_item_id == MTOItem.id) \
+                .join(MTOProgress, MTOConsumption.mto_item_id == MTOProgress.mto_item_id)
+            return pd.read_sql(query.statement, session.bind)
+        finally:
+            session.close()
+
+    def get_optimized_spool_suggestion(self, project_id: int, line_no: str) -> Tuple[bool, str, dict | None]:
+        """
+        --- NEW: تابع جدید برای بهینه‌سازی مصرف اسپول ---
+        با الگوریتم حریصانه (Greedy)، بهترین ترکیب اسپول‌ها را برای تأمین نیازهای
+        یک خط با کمترین ضایعات ممکن پیشنهاد می‌دهد.
+        """
+        session = self.get_session()
+        try:
+            # 1. گرفتن تمام نیازهای باقی‌مانده خط
+            needed_items = session.query(MTOProgress).filter(
+                MTOProgress.project_id == project_id,
+                MTOProgress.line_no == line_no,
+                MTOProgress.remaining_qty > 0,
+                MTOItem.item_type.ilike('%PIPE%')  # فعلا فقط برای پایپ
+            ).join(MTOItem, MTOProgress.mto_item_id == MTOItem.id).all()
+
+            if not needed_items:
+                return True, "این خط هیچ پایپ باقی‌مانده‌ای برای بهینه‌سازی ندارد.", None
+
+            optimization_plan = {"items": [], "summary": ""}
+            total_waste = 0
+
+            for mto_item in needed_items:
+                needed_length = mto_item.remaining_qty
+
+                mto_details = session.get(MTOItem, mto_item.mto_item_id)
+
+                # 2. پیدا کردن تمام اسپول‌های پایپ سازگار
+                compatible_spools = self.get_mapped_spool_items(mto_details.item_type, mto_details.p1_bore_in)
+
+                # مرتب‌سازی اسپول‌ها: اول آن‌هایی که طولشان به نیاز ما نزدیک‌تر (ولی بزرگتر) است
+                compatible_spools.sort(
+                    key=lambda s: (s.length or 0) - needed_length if (s.length or 0) >= needed_length else float('inf'))
+
+                item_plan = {"mto_desc": mto_item.description, "selections": []}
+
+                # 3. الگوریتم حریصانه
+                for spool_item in compatible_spools:
+                    if needed_length <= 0: break
+                    if (spool_item.length or 0) > 0.01:
+                        take_qty = min(needed_length, spool_item.length)
+
+                        item_plan["selections"].append({
+                            "spool_item_id": spool_item.id,
+                            "spool_id": spool_item.spool.spool_id,
+                            "used_qty": take_qty
+                        })
+                        needed_length -= take_qty
+
+                if needed_length > 0.01:
+                    return False, f"موجودی اسپول برای '{mto_item.description}' کافی نیست. {needed_length:.2f} متر کمبود وجود دارد.", None
+
+                # محاسبه ضایعات برای بهترین انتخاب (اولین اسپول در لیست مرتب‌شده)
+                best_fit_spool = compatible_spools[0] if compatible_spools else None
+                if best_fit_spool and best_fit_spool.length > mto_item.remaining_qty:
+                    waste = best_fit_spool.length - mto_item.remaining_qty
+                    total_waste += waste
+
+                optimization_plan["items"].append(item_plan)
+
+            summary = f"پیشنهاد بهینه با موفقیت محاسبه شد. کل ضایعات (Off-cut) تخمینی: {total_waste:.2f} متر."
+            optimization_plan["summary"] = summary
+
+            return True, summary, optimization_plan
+
+        except Exception as e:
+            logging.error(f"Error in spool optimization: {e}")
+            return False, f"خطا در محاسبه بهینه‌سازی: {e}", None
+        finally:
+            session.close()
+
+    #--------------------------------------------------------------------
+    #️ --- متدهای جدید برای استفاده از مدل‌ها ---
+    #--------------------------------------------------------------------
+
+    def get_recommendations(self, item_codes: list[str], project_id: int) -> list[str]:
+        """پیشنهادها را از موتور هوشمند برای یک پروژه خاص دریافت می‌کند."""
+        group_key = f'proj_{project_id}'
+        return self.recommender.recommend(item_codes, group_key=group_key)
+
+    def get_predicted_shortages(self, project_id: int) -> list[dict]:
+        """لیستی از آیتم‌هایی که در آینده با کسری مواجه می‌شوند را برمی‌گرداند."""
+        session = self.get_session()
+        try:
+            items_with_remaining = session.query(MTOProgress).filter(
+                MTOProgress.project_id == project_id,
+                MTOProgress.remaining_qty > 0
+            ).all()
+
+            predictions = []
+            for item in items_with_remaining:
+                predicted_date = self.shortage_predictor.predict(
+                    item_code=item.item_code,
+                    total_required=item.total_qty,
+                    current_used=item.used_qty
+                )
+                if predicted_date:
+                    predictions.append({
+                        "Item Code": item.item_code,
+                        "Description": item.description,
+                        "Remaining Qty": item.remaining_qty,
+                        "Predicted Shortage Date": predicted_date
+                    })
+
+            # مرتب‌سازی: تاریخ‌های مشخص اول، سپس "اکنون" و در آخر "هرگز"
+            return sorted(predictions, key=lambda x: (
+                '2' if x['Predicted Shortage Date'].startswith('ا') else (
+                    '3' if x['Predicted Shortage Date'].startswith('ه') else '1'),
+                x['Predicted Shortage Date']
+            ))
+        finally:
+            session.close()
+
+    def check_for_anomaly(self, consumption_data: dict):
+        """یک رکورد مصرف را برای ناهنجاری بررسی می‌کند."""
+        df = pd.DataFrame([consumption_data])
+        is_anomaly = self.anomaly_detector.predict(df)
+        if is_anomaly:
+            # اگر ناهنجار بود، یک لاگ ویژه ثبت کن
+            details = f"Anomaly Detected! Used: {consumption_data['used_qty']}, Total: {consumption_data['total_qty']}, Time: {consumption_data['timestamp']}"
+            self.log_activity(user="AI_SYSTEM", action="ANOMALY_DETECTED", details=details)
+
