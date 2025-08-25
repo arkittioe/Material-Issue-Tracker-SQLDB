@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 )
 
 from PyQt6.QtGui import QFont, QColor
-from PyQt6.QtCore import Qt, QStringListModel, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QStringListModel, pyqtSignal, QObject, QTimer
 
 # برای نمایش نمودار در PyQt6
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -705,6 +705,11 @@ class MainWindow(QMainWindow):
         self.suggestion_data = []
         self.dashboard_password = "hossein"#DASHBOARD_PASSWORD
 
+        # <<< CHANGE: تایمر برای Debouncing اضافه شد
+        self.suggestion_timer = QTimer(self)
+        self.suggestion_timer.setSingleShot(True)
+        self.suggestion_timer.setInterval(800)  # 300 میلی‌ثانیه تاخیر
+
         self.iso_observer = None  # متغیر برای نگه داشتن ترد نگهبان
 
         # تعریف یک سیگنال در کلاس اصلی برای دریافت پیام از ترد نگهبان
@@ -824,19 +829,30 @@ class MainWindow(QMainWindow):
 
     def create_dashboard(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
-        layout.addWidget(QLabel("<h3>داشبورد پیشرفت خط</h3>"))
+
+        # <<< CHANGE: یک چیدمان افقی برای عنوان و دکمه ایجاد می‌کنیم
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("<h3>داشبورد پیشرفت خط</h3>"))
+        header_layout.addStretch()  # فضای خالی اضافه می‌کند
+
+        # <<< ADDED: دکمه جدید برای به‌روزرسانی نمودار
+        self.update_dashboard_btn = QPushButton("🔄 به‌روزرسانی نمودار")
+        header_layout.addWidget(self.update_dashboard_btn)
+
+        layout.addLayout(header_layout)  # چیدمان هدر را به طرح اصلی اضافه می‌کنیم
+
         # نمودار پای‌چارت اصلی
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.canvas = FigureCanvas(self.fig)
         layout.addWidget(self.canvas)
 
         self.dashboard_ax = self.fig.add_subplot(111)
-        self.dashboard_ax.text(0.5, 0.5, "Enter the line number", ha='center', va='center')
+        self.dashboard_ax.text(0.5, 0.5, "Enter a line number", ha='center', va='center')
 
         self.canvas.draw()
 
-        # دکمه نمایش جزئیات
-        self.details_btn = QPushButton("نمایش جزئیات خط")
+        # دکمه نمایش جزئیات (این دکمه می‌تواند باقی بماند یا حذف شود)
+        self.details_btn = QPushButton("نمایش جزئیات کامل پروژه")
         self.details_btn.clicked.connect(self.show_line_details)
         layout.addWidget(self.details_btn)
 
@@ -907,13 +923,16 @@ class MainWindow(QMainWindow):
         self.register_btn.clicked.connect(self.handle_registration)
         self.search_btn.clicked.connect(self.handle_search)
 
-        self.entries["Line No"].textChanged.connect(self.update_suggestions)
-        self.search_entry.textChanged.connect(self.update_suggestions)
+        self.update_dashboard_btn.clicked.connect(self.handle_update_dashboard_button_click)
+
+        self.entries["Line No"].textChanged.connect(self.on_text_changed)
+        self.search_entry.textChanged.connect(self.on_text_changed)
+
+        # <<< CHANGE: اتصال تایمر به تابع اصلی برای گرفتن پیشنهادها
+        self.suggestion_timer.timeout.connect(self.fetch_suggestions)
 
         # 🔹 سیگنال کلیدی برای انتخاب یک آیتم از لیست پیشنهادها
         self.line_completer.activated.connect(self.on_suggestion_selected)
-
-        self.entries["Line No"].textChanged.connect(self.update_line_dashboard)
 
         self.manage_spool_btn.clicked.connect(self.open_spool_manager)
 
@@ -922,6 +941,10 @@ class MainWindow(QMainWindow):
 
         # --- NEW: اتصال سیگنال پیشرفت به اسلات جدید ---
         self.iso_event_handler.progress_updated.connect(self.update_iso_progress)
+
+    def on_text_changed(self):
+        """هر بار که متن تغییر می‌کند، تایمر را ری‌استارت می‌کند."""
+        self.suggestion_timer.start()
 
     def populate_project_combo(self):
         self.project_combo.clear()
@@ -950,19 +973,25 @@ class MainWindow(QMainWindow):
             # اگر "همه پروژه‌ها" انتخاب شود
             self.log_to_console("حالت جستجوی سراسری فعال است. یک خط را جستجو کنید.", "info")
 
-    def update_suggestions(self, text):
+    def fetch_suggestions(self):
         """
-        مدل Completer را با پیشنهادهای سراسری به‌روز می‌کند.
+        این متد تنها پس از اتمام زمان تایمر فراخوانی می‌شود.
         """
-        # 🔹 دیگر نیازی به انتخاب پروژه نیست
+        # تشخیص می‌دهیم کدام فیلد ورودی فعال است
+        focused_widget = QApplication.focusWidget()
+        if isinstance(focused_widget, QLineEdit):
+            text = focused_widget.text()
+        else:
+            return # اگر هیچ فیلدی فعال نبود، کاری نکن
+
         if len(text) < 2:
             self.line_completer_model.setStringList([])
             return
 
-        # ۱. دریافت داده‌های کامل از دیتابیس
+        # 1. دریافت داده‌های کامل از دیتابیس (با کوئری بهینه)
         self.suggestion_data = self.dm.get_line_no_suggestions(text)
 
-        # ۲. استخراج متن نمایشی برای Completer
+        # 2. استخراج متن نمایشی برای Completer
         display_list = [item['display'] for item in self.suggestion_data]
         self.line_completer_model.setStringList(display_list)
 
@@ -970,7 +999,6 @@ class MainWindow(QMainWindow):
         """
         وقتی کاربر یک پیشنهاد را انتخاب می‌کند، این متد فراخوانی می‌شود.
         """
-        # ۱. پیدا کردن اطلاعات کامل پیشنهاد انتخاب‌شده
         selected_item = next((item for item in self.suggestion_data if item['display'] == selected_display_text), None)
 
         if not selected_item:
@@ -982,15 +1010,31 @@ class MainWindow(QMainWindow):
         index = self.project_combo.findText(project_name, Qt.MatchFlag.MatchFixedString)
         if index >= 0:
             self.project_combo.setCurrentIndex(index)
-            # فراخوانی load_project برای به‌روزرسانی self.current_project
             self.load_project()
 
-        # با QApplication.focusWidget() می‌فهمیم کدام فیلد فعال بوده است
         focused_widget = QApplication.focusWidget()
         if isinstance(focused_widget, QLineEdit):
+            # <<< CHANGE: سیگنال‌ها را موقتاً بلاک می‌کنیم تا از فراخوانی مجدد جلوگیری شود
+            focused_widget.blockSignals(True)
             focused_widget.setText(line_no)
-            # آپدیت داشبورد با خط جدید
-            self.update_line_dashboard()
+            focused_widget.blockSignals(False)
+
+        # <<< ADDED: داشبورد فقط در اینجا آپدیت می‌شود
+        if self.current_project:
+             self.update_line_dashboard(line_no)
+
+    def handle_update_dashboard_button_click(self):
+        """نمودار را بر اساس متن موجود در فیلد Line No به‌روز می‌کند."""
+        if not self.current_project:
+            self.show_message("هشدار", "لطفاً ابتدا یک پروژه را انتخاب کنید.", "warning")
+            return
+
+        line_no = self.entries["Line No"].text().strip()
+        if not line_no:
+            self.show_message("هشدار", "لطفاً شماره خط را برای نمایش نمودار وارد کنید.", "warning")
+            return
+
+        self.update_line_dashboard(line_no)
 
     def handle_registration(self):
         if not self.current_project:
@@ -1049,6 +1093,7 @@ class MainWindow(QMainWindow):
             self.log_to_console(msg, "error")
 
     def handle_search(self):
+        # <<< FIX: Add a guard clause at the very top.
         if not self.current_project:
             self.show_message("خطا", "لطفاً ابتدا یک پروژه را بارگذاری کنید.", "warning")
             return
@@ -1058,12 +1103,18 @@ class MainWindow(QMainWindow):
             self.show_message("خطا", "لطفاً شماره خط برای جستجو را وارد کنید.", "warning")
             return
 
+        # Now that we know a project and line_no exist, update the UI.
+        self.entries["Line No"].setText(line_no)
+        self.update_line_dashboard(line_no)
+
+        # Proceed with the database search.
         records = self.dm.search_miv_by_line_no(self.current_project.id, line_no)
 
         if not records:
             self.show_message("نتیجه", f"هیچ رکوردی برای خط '{line_no}' یافت نشد.", "info")
             return
 
+        # --- The rest of the function for creating the dialog remains unchanged ---
         dlg = QDialog(self)
         dlg.setWindowTitle(f"نتایج جستجو - خط {line_no}")
         dlg.resize(950, 450)
@@ -1287,11 +1338,13 @@ class MainWindow(QMainWindow):
 
         dlg.exec()
 
-    def update_line_dashboard(self):
+    def update_line_dashboard(self, line_no=None):
         if not self.current_project:
             return
 
-        line_no = self.entries["Line No"].text().strip()
+        if line_no is None:
+            line_no = self.entries["Line No"].text().strip()
+
         self.dashboard_ax.clear()
 
         if not line_no:

@@ -442,60 +442,49 @@ class DataManager:
         finally:
             session.close()
 
-    def get_line_no_suggestions(self, typed_text, top_n=7):
+    def get_line_no_suggestions(self, typed_text: str, top_n: int = 15) -> List[Dict[str, Any]]:
         """
+        (نسخه بهینه‌سازی شده با استفاده از LIKE)
         در تمام پروژه‌ها جستجو کرده و شماره خط‌های مشابه را به همراه نام پروژه پیشنهاد می‌دهد.
-        این متد دیگر به project_id نیاز ندارد و به صورت سراسری عمل می‌کند.
+        این جستجو مستقیماً در دیتابیس و با سرعت بالا انجام می‌شود.
         """
         if not typed_text or len(typed_text) < 2:
             return []
 
         session = self.get_session()
         try:
-            # ۱. جستجوی سراسری با JOIN برای واکشی نام پروژه
-            query = session.query(
-                MTOItem.line_no,
-                Project.name,
-                Project.id
-            ).join(Project, MTOItem.project_id == Project.id).distinct()
+            # ساخت عبارت جستجو برای اپراتور LIKE
+            search_term = f"%{typed_text}%"
 
-            all_lines_data = query.all()
+            # کوئری بهینه که فیلتر را در دیتابیس اعمال می‌کند
+            query = (
+                session.query(
+                    MTOItem.line_no,
+                    Project.name,
+                    Project.id
+                )
+                .join(Project, MTOItem.project_id == Project.id)
+                .filter(MTOItem.line_no.ilike(search_term))  # ilike برای جستجوی غیرحساس به حروف
+                .distinct()
+                .limit(top_n)
+            )
 
-            # ۲. نرمال‌سازی ورودی
-            norm_input = str(typed_text).replace(" ", "").lower()
+            results = query.all()
 
-            # ۳. محاسبه شباهت
-            matches = []
-            seen_lines = set()  # برای جلوگیری از نمایش خطوط تکراری از یک پروژه
-
-            for line_no, project_name, project_id in all_lines_data:
-                if not line_no or (line_no, project_name) in seen_lines:
-                    continue
-
-                norm_line = str(line_no).replace(" ", "").lower()
-                ratio = difflib.SequenceMatcher(None, norm_input, norm_line).ratio()
-
-                if norm_input in norm_line:
-                    ratio += 0.2
-
-                if ratio > 0.4:
-                    # ۴. ساخت یک دیکشنری کامل از اطلاعات برای هر پیشنهاد
-                    matches.append({
-                        'ratio': ratio,
-                        'display': f"{line_no}  ({project_name})",  # متن نمایشی برای کاربر
-                        'line_no': line_no,
-                        'project_name': project_name,
-                        'project_id': project_id
-                    })
-                    seen_lines.add((line_no, project_name))
-
-            # ۵. مرتب‌سازی و برگرداندن N نتیجه برتر
-            matches.sort(key=lambda x: x['ratio'], reverse=True)
-
-            return matches[:top_n]
+            # تبدیل نتایج به فرمت دیکشنری مورد نیاز UI
+            suggestions = [
+                {
+                    'display': f"{line_no}  ({project_name})",
+                    'line_no': line_no,
+                    'project_name': project_name,
+                    'project_id': project_id
+                }
+                for line_no, project_name, project_id in results
+            ]
+            return suggestions
 
         except Exception as e:
-            print(f"⚠️ خطا در پیشنهاد سراسری شماره خط: {e}")
+            logging.error(f"خطا در پیشنهاد سراسری شماره خط (بهینه شده): {e}")
             return []
         finally:
             session.close()
