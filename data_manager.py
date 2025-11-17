@@ -1046,7 +1046,7 @@ class DataManager:
         except Exception as e:
             return False, f"خطا در پشتیبان‌گیری: {e}"
 
-    def update_mto_progress(self, project_id, line_no, updates):
+    def update_mto_progress(self, project_id, line_no, updates):  # ENHANCE: Add logging for debugging
         """
         بروزرسانی جدول mto_progress بر اساس آیتم‌های مصرفی جدید.
         updates: لیستی از تاپل‌ها (item_code, qty, unit, description)
