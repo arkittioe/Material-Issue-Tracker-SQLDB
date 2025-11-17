@@ -2632,3 +2632,5 @@ class DataManager:
             details = f"Anomaly Detected! Used: {consumption_data['used_qty']}, Total: {consumption_data['total_qty']}, Time: {consumption_data['timestamp']}"
             self.log_activity(user="AI_SYSTEM", action="ANOMALY_DETECTED", details=details)
 
+
+# Last modified: 2025-11-17 09:09:32
