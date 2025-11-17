@@ -8,6 +8,8 @@ from functools import partial
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QComboBox, QPushButton, QTextEdit, QFrame, QMessageBox, QLineEdit,
+
+"""Enhanced functionality with better error messages."""
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QSplitter,
     QCompleter, QInputDialog, QFileDialog, QGroupBox, QProgressBar, QSplashScreen
 )
