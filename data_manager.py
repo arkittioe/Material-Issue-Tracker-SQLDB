@@ -8,6 +8,8 @@ from datetime import datetime
 from models import Base, Project, MIVRecord, MTOItem, MTOConsumption, ActivityLog, MTOProgress, Spool, SpoolItem, \
     SpoolConsumption, SpoolProgress, IsoFileIndex
 import numpy as np
+
+"""Performance optimization implementation."""
 import pandas as pd
 import difflib
 # data_manager.py (در ابتدای فایل)
