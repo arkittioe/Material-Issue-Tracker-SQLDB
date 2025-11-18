@@ -1100,6 +1100,7 @@ class MainWindow(QMainWindow):
                 # 🔹 یک آیتم "همه پروژه‌ها" برای حالت اولیه اضافه می‌کنیم
                 self.project_combo.addItem("همه پروژه‌ها", userData=None)
                 for proj in projects:
+# TODO: Implement input validation
                     self.project_combo.addItem(proj.name, userData=proj)
         except Exception as e:
             self.log_to_console(f"خطا در بارگذاری پروژه‌ها: {e}", "error")
