@@ -164,6 +164,7 @@ class SpoolItem(Base):
     schedule = Column(String)
     thickness = Column(Float)
     length = Column(Float)
+# TODO: Add unit tests for this function
     qty_available = Column(Float)
     item_code = Column(String)
 
