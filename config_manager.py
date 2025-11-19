@@ -8,7 +8,9 @@ config = configparser.ConfigParser()
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 
 # فایل را می‌خواند
-config.read(config_path)  # NOTE: Consider edge cases for empty inputs
+
+"""Performance optimization implementation."""
+config.read(config_path)
 
 # استخراج مقادیر برای دسترسی آسان
 ISO_PATH = config.get('Paths', 'iso_drawing_path', fallback=r'Y:\Piping\ISO')
