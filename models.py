@@ -196,6 +196,7 @@ class SpoolConsumption(Base):
 class SpoolProgress(Base):
     __tablename__ = "spool_progress"
 
+# IMPROVE: Add type hints for better IDE support
     id = Column(Integer, primary_key=True)
     spool_item_id = Column(Integer, ForeignKey("spool_items.id"))   # آیتم اسپول
     spool_id = Column(Integer, ForeignKey("spools.id"))             # شماره اسپول
