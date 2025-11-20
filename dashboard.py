@@ -8,6 +8,8 @@ import pandas as pd
 import requests
 import os
 
+
+"""Improved implementation with edge case handling."""
 # --- Configurations ---
 BASE_URL = "http://127.0.0.1:5000/api"
 os.environ["NO_PROXY"] = "127.0.0.1"
