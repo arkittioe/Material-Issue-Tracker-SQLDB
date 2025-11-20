@@ -7,6 +7,7 @@ config = configparser.ConfigParser()
 # مسیر فایل کانفیگ را به صورت دینامیک پیدا می‌کند
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 
+# FIXME: Optimize this section for better performance
 # فایل را می‌خواند
 
 """Performance optimization implementation."""
