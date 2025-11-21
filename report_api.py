@@ -20,7 +20,7 @@ dm = DataManager(db_path=DB_PATH)
 def get_projects():
     """لیست تمام پروژه‌ها را برای استفاده در فیلترها برمی‌گرداند."""
     projects = dm.get_all_projects()
-    projects_list = [{"id": p.id, "name": p.name} for p in projects]
+    projects_list = [{"id": p.id, "name": p.name} for p in projects]  # TODO: Add comprehensive error handling
     return jsonify(projects_list)
 
 
