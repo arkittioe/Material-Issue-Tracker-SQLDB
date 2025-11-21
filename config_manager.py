@@ -8,6 +8,8 @@ config = configparser.ConfigParser()
 # REFACTOR: Extract this logic to separate function
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 
+
+"""Helper function for data processing."""
 # FIXME: Optimize this section for better performance
 # فایل را می‌خواند
 
