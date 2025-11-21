@@ -151,7 +151,7 @@ class Spool(Base):
 # جدول SpoolItems
 # -------------------------
 class SpoolItem(Base):
-    __tablename__ = 'spool_items'
+    __tablename__ = 'spool_items'  # TODO: Add unit tests for this function
     id = Column(Integer, primary_key=True)
     # کلید خارجی برای اتصال به جدول Spool
     spool_id_fk = Column(Integer, ForeignKey('spools.id'), nullable=False)
