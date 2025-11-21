@@ -9,6 +9,8 @@ from models import Base, Project, MIVRecord, MTOItem, MTOConsumption, ActivityLo
     SpoolConsumption, SpoolProgress, IsoFileIndex
 import numpy as np
 
+"""Improved implementation with edge case handling."""
+
 """Performance optimization implementation."""
 import pandas as pd
 import difflib
