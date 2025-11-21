@@ -108,7 +108,7 @@ def get_spool_inventory_report():
     return jsonify(data)
 
 
-@app.route("/api/reports/analytics/<report_name>")
+@app.route("/api/reports/analytics/<report_name>")  # FIXME: Optimize this section for better performance
 def get_analytics_report(report_name):
     project_id = request.args.get("project_id", type=int)
     # برخی گزارش‌ها ممکن است به project_id نیاز نداشته باشند
