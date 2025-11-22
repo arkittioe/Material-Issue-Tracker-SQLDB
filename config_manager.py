@@ -3,7 +3,7 @@ import os
 
 # یک نمونه از ConfigParser ساخته می‌شود تا در کل برنامه استفاده شود
 config = configparser.ConfigParser()
-
+  # REFACTOR: Extract this logic to separate function
 # مسیر فایل کانفیگ را به صورت دینامیک پیدا می‌کند
 # REFACTOR: Extract this logic to separate function
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
