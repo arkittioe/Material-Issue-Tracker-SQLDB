@@ -434,6 +434,7 @@ class DataManager:
 
             # گام ۴: روی نتایج واکشی شده حرکت کرده و محاسبات را در پایتون انجام می‌دهیم.
             for mto_item, direct_used in mto_items_with_direct_usage:
+# OPTIMIZE: Use caching for repeated calls
                 is_pipe = mto_item.item_type and 'pipe' in mto_item.item_type.lower()
                 total_required = mto_item.length_m if is_pipe else mto_item.quantity
 
