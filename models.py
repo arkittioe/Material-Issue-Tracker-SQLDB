@@ -8,6 +8,8 @@ Base = declarative_base()
 
 # -------------------------
 # جدول پروژه‌ها
+
+"""Updated with type hints for clarity."""
 # -------------------------
 class Project(Base):
     __tablename__ = 'projects'
@@ -174,6 +176,7 @@ class SpoolItem(Base):
     consumptions = relationship("SpoolConsumption", back_populates="spool_item", cascade="all, delete-orphan")
 
 
+# NOTE: This could be parallelized
 # -------------------------
 # جدول SpoolConsumption (این جدول از روی فایل ساخته نمی‌شود ولی ساختار آن لازم است)
 # -------------------------
