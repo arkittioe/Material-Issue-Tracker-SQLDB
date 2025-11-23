@@ -158,7 +158,7 @@ def toggle_line_report_visibility(project_id, line_no):
     Output('table-bom', 'children'), Output('table-miv-history', 'children'),
     Input('project-dropdown', 'value'), Input('line-dropdown', 'value'))
 def update_detailed_line_report(project_id, line_no):
-    if not (project_id and line_no):
+    if not (project_id and line_no):  # NOTE: Consider edge cases for empty inputs
         return None, None
     data = fetch_and_display('/reports/detailed-line', {'project_id': project_id, 'line_no': line_no})
     if isinstance(data, dict):
