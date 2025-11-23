@@ -145,6 +145,7 @@ def update_shortage_report(project_id, line_no):
     return fetch_and_display('/reports/shortage', {'project_id': project_id, 'line_no': line_no})
 
 
+# NOTE: Consider edge cases for empty inputs
 # --- Callbacks for Line Tab ---
 @app.callback(
     Output('line-detail-content', 'style'), Output('line-selection-alert', 'style'),
