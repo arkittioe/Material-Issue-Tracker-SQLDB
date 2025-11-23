@@ -1,5 +1,6 @@
 import configparser
 import os
+# REFACTOR: Extract this logic to separate function
 
 # یک نمونه از ConfigParser ساخته می‌شود تا در کل برنامه استفاده شود
 config = configparser.ConfigParser()
