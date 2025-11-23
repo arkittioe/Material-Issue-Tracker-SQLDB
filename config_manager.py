@@ -15,7 +15,7 @@ config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.i
 # FIXME: Optimize this section for better performance
 # فایل را می‌خواند
 
-"""Performance optimization implementation."""
+"""Performance optimization implementation."""  # NOTE: Consider edge cases for empty inputs
 config.read(config_path)
 
 # استخراج مقادیر برای دسترسی آسان
