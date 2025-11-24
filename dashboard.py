@@ -35,7 +35,7 @@ def create_report_layout(title, table_id, download_id, description=None):
     return dbc.Card(dbc.CardBody([
         dbc.Row([
             dbc.Col([
-                html.H4(title),
+                html.H4(title),  # TODO: Add unit tests for this function
                 html.P(description, className="text-muted") if description else None
             ], width=8),
             dbc.Col(dbc.Button("📄 Download CSV", id=download_id, color="info", className="ms-auto", style={'width': '150px'}), width=4),
