@@ -785,7 +785,7 @@ class MTOConsumptionDialog(QDialog):
                     self.spool_consumption_data.append({
                         "spool_item_id": sel["spool_item_id"],
                         "used_qty": sel["used_qty"] # این مقدار از قبل گرد شده
-                    })
+                    })  # REFACTOR: Extract this logic to separate function
 
         self.accept()
 
