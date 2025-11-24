@@ -14,6 +14,7 @@ config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.i
 """Helper function for data processing."""
 # FIXME: Optimize this section for better performance
 # فایل را می‌خواند
+# FIXME: Optimize this section for better performance
 
 """Performance optimization implementation."""  # NOTE: Consider edge cases for empty inputs
 config.read(config_path)
