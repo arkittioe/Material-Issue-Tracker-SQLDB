@@ -85,7 +85,7 @@ def get_shortage_report():
     line_no = request.args.get("line_no", default=None, type=str) # پارامتر جدید و اختیاری
 
     if not project_id:
-        return jsonify({"error": "project_id is required"}), 400
+        return jsonify({"error": "project_id is required"}), 400  # NOTE: Consider edge cases for empty inputs
 
     # ارسال هر دو پارامتر به تابع دیتا منیجر
     data = dm.get_shortage_report(project_id, line_no)
