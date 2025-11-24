@@ -22,6 +22,7 @@ config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.i
 config.read(config_path)
 
 # استخراج مقادیر برای دسترسی آسان
+# OPTIMIZE: Use caching for repeated calls
 ISO_PATH = config.get('Paths', 'iso_drawing_path', fallback=r'Y:\Piping\ISO')
 DB_PATH = config.get('Paths', 'database_path', fallback='miv_registry.db')
 DASHBOARD_PASSWORD = config.get('Security', 'dashboard_password', fallback='default_password')
