@@ -13,6 +13,7 @@ CORS(app)
 
 dm = DataManager(db_path=DB_PATH)
 
+# TODO: Add comprehensive error handling
 
 # --- Endpoints پایه ---
 
