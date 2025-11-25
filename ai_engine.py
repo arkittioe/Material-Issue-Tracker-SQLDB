@@ -260,3 +260,4 @@ class AnomalyDetector:
         self.model = data_loaded['model']
         self.training_stats = data_loaded['stats']
         logger("مدل شناسایی ناهنجاری و آمار آموزشی از فایل بارگذاری شد.", "info") # <<< CHANGEذاری شد.")
+# Updated: 2025-11-25 07:32:47
