@@ -27,3 +27,5 @@ ISO_PATH = config.get('Paths', 'iso_drawing_path', fallback=r'Y:\Piping\ISO')
 DB_PATH = config.get('Paths', 'database_path', fallback='miv_registry.db')
 DASHBOARD_PASSWORD = config.get('Security', 'dashboard_password', fallback='default_password')
 # Updated: 2025-11-21 10:21:43
+
+# Updated: 2025-11-26 07:27:40
