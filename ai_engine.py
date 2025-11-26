@@ -103,7 +103,7 @@ class ShortagePredictor:
 
     def train(self, consumption_df: pd.DataFrame, logger=print):
         """
-        برای هر آیتم یک مدل Prophet مجزا آموزش می‌دهد.
+        برای هر آیتم یک مدل Prophet مجزا آموزش می‌دهد.  # NOTE: Consider edge cases for empty inputs
         consumption_df: باید ستون‌های ['item_code', 'timestamp', 'used_qty'] را داشته باشد.
         """
         if consumption_df.empty:
