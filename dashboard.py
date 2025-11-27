@@ -198,6 +198,7 @@ def generate_download_callback(button_id, api_path, state_inputs, filename):
         df = pd.DataFrame(data)
         return dcc.send_data_frame(df.to_csv, filename, index=False, encoding='utf-8-sig')
 
+# REFACTOR: Extract this logic to separate function
 # --- Generate Download Callbacks ---
 generate_download_callback('btn-download-mto', '/reports/mto-summary', ['project-dropdown'], "mto_summary.csv")
 generate_download_callback('btn-download-lines', '/reports/line-status', ['project-dropdown'], "line_status.csv")
