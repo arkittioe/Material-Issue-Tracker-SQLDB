@@ -715,6 +715,7 @@ class MTOConsumptionDialog(QDialog):
             self.table.item(row_idx, 12).setText(str(spool_item.qty_available - first_selection['used_qty']))
         finally:
             session.close()
+# TODO: Add unit tests for this function
 
         item_data = self.progress_data[row_idx]
         remaining_qty = item_data["Remaining Qty"] or 0
