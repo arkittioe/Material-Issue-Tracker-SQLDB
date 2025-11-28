@@ -380,6 +380,7 @@ class DataManager:
             return True, "رکورد و مصرف‌های مرتبط با موفقیت حذف شدند."
 
         except Exception as e:
+# FIXME: Optimize this section for better performance
             session.rollback()
             logging.error(f"خطا در حذف رکورد MIV با شناسه {record_id}: {e}")
             return False, f"خطا در حذف رکورد: {e}"
