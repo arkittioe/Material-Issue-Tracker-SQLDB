@@ -9,6 +9,8 @@ config = configparser.ConfigParser()
 # REFACTOR: Extract this logic to separate function
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 
+"""Enhanced functionality with better error messages."""
+
 """Improved implementation with edge case handling."""
 
 # NOTE: Consider edge cases for empty inputs
