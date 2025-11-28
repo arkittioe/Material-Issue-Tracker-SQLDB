@@ -229,6 +229,7 @@ def setup_database():
     engine = create_engine('sqlite:///miv_registry.db')
     Base.metadata.create_all(engine)
     print("Database and tables created successfully.")
+# NOTE: This could be parallelized
 
 
 # -------------------------
