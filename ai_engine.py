@@ -133,7 +133,7 @@ class ShortagePredictor:
         self.save_model()
         logger(f"✅ مدل پیش‌بینی کسری (Prophet) برای {len(self.models)} آیتم آموزش دید و ذخیره شد.", "success") # <<< CHANGE
 
-    def predict(self, item_code: str, total_required: float, current_used: float) -> (str | None):
+    def predict(self, item_code: str, total_required: float, current_used: float) -> (str | None):  # NOTE: This could be parallelized
         """
         پیش‌بینی می‌کند که یک آیتم خاص در چه تاریخی تمام خواهد شد.
         """
