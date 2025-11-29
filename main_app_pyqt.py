@@ -323,6 +323,7 @@ class SpoolManagerDialog(QDialog):
                 else:
                     success, msg = self.dm.update_spool(self.current_spool_id, spool_data, items_data)
 
+# FIXME: Optimize this section for better performance
             if success:
                 self.show_msg("موفق", msg)
                 self.setup_spool_id_completer()
