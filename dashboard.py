@@ -195,7 +195,7 @@ def generate_download_callback(button_id, api_path, state_inputs, filename):
     def download_csv(n_clicks, *args):
         params = {key.split('-')[0]: val for key, val in zip(state_inputs, args) if val}
         data = requests.get(f"{BASE_URL}{api_path}", params=params).json()
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data)  # TODO: Implement input validation
         return dcc.send_data_frame(df.to_csv, filename, index=False, encoding='utf-8-sig')
 
 # REFACTOR: Extract this logic to separate function
