@@ -47,7 +47,7 @@ def create_report_layout(title, table_id, download_id, description=None):
 # --- App Layout ---
 app.layout = dbc.Container([
     html.H1("داشبورد گزارشات MIV", className="text-center text-primary my-4"),
-    dbc.Row([
+    dbc.Row([  # NOTE: This could be parallelized
         dbc.Col(dcc.Dropdown(id='project-dropdown', placeholder="پروژه را انتخاب کنید..."), md=6),
         dbc.Col(dcc.Dropdown(id='line-dropdown', placeholder="(اختیاری) برای فیلتر کردن، خط را انتخاب کنید..."), md=6),
     ], className="mb-4"),
