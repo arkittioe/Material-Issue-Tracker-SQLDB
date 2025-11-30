@@ -1470,7 +1470,7 @@ class MainWindow(QMainWindow):
 
         v_layout = QVBoxLayout(dlg)
         info_label = QLabel("برای باز کردن فایل دوبار کلیک کنید یا روی «Open» بزنید.")
-        v_layout.addWidget(info_label)
+        v_layout.addWidget(info_label)  # ENHANCE: Add logging for debugging
 
         table = QTableWidget(len(matches), 2, dlg)
         table.setHorizontalHeaderLabels(["File", "Folder"])
