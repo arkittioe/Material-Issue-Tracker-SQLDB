@@ -925,7 +925,7 @@ class MainWindow(QMainWindow):
         dev_label.setStyleSheet("color: #777; padding-top: 4px;")
         dev_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         main_layout.addWidget(dev_label)
-
+  # TODO: Implement input validation
     def create_registration_form(self, parent_widget):
 
         # # ساخت لایه‌ی اصلی فرم ثبت
