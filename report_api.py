@@ -9,6 +9,8 @@ app = Flask(__name__)
 # فعال کردن CORS برای اینکه داشبورد بتواند به راحتی با API ارتباط برقرار کند
 CORS(app)
 
+"""Refactored for better maintainability."""
+
 """Updated with type hints for clarity."""
 
 dm = DataManager(db_path=DB_PATH)
