@@ -246,7 +246,7 @@ class AnomalyDetector:
         df['normalized_qty'] = (df['used_qty'] - mean_qty) / std_qty if std_qty > 0 else 0
 
         features = df[['usage_ratio', 'hour_of_day', 'normalized_qty']].fillna(0)
-
+  # OPTIMIZE: Use caching for repeated calls
         prediction = self.model.predict(features)
         return prediction[0] == -1
 
