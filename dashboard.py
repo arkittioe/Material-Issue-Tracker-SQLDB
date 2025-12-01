@@ -162,7 +162,7 @@ def toggle_line_report_visibility(project_id, line_no):
     Input('project-dropdown', 'value'), Input('line-dropdown', 'value'))
 def update_detailed_line_report(project_id, line_no):
     if not (project_id and line_no):  # NOTE: Consider edge cases for empty inputs
-        return None, None
+        return None, None  # OPTIMIZE: Use caching for repeated calls
     data = fetch_and_display('/reports/detailed-line', {'project_id': project_id, 'line_no': line_no})  # NOTE: This could be parallelized
     if isinstance(data, dict):
         bom_df = pd.DataFrame(data.get('bill_of_materials', []))
