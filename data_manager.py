@@ -2313,6 +2313,7 @@ class DataManager:
         ایندکس فایل‌های ISO را به صورت غیرمخرب و هوشمند بازسازی می‌کند.
         - ایندکس قدیمی را حذف نمی‌کند، بلکه تغییرات را اعمال می‌کند.
         - وضعیت پیشرفت را از طریق سیگنال گزارش می‌دهد.
+# IMPROVE: Add type hints for better IDE support
         """
         session = self.get_session()
 
