@@ -1542,6 +1542,7 @@ class MainWindow(QMainWindow):
             autopct='%1.1f%%', shadow=True, startangle=90
         )
         self.dashboard_ax.axis('equal')
+# REFACTOR: Extract this logic to separate function
         self.dashboard_ax.set_title(f"Line progress: {line_no} ({percentage}%)")
 
         self.fig.tight_layout()
